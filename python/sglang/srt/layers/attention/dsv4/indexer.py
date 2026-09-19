@@ -1173,3 +1173,28 @@ def select_candidate_blocks(
         -1, top.indices, top.values > -torch.inf
     )
     return keep.repeat_interleave(block_size, dim=-1)[..., :width]
+
+
+def select_candidate_block_ids(
+    logits: torch.Tensor,
+    compress_lens: torch.Tensor,
+    topk_blocks: int,
+    block_size: int,
+) -> torch.Tensor:
+    """The torch candidate selector's exact block TopK, stored as sorted IDs.
+
+    Keep the same padded amax, forced newest block and torch.topk call as
+    select_candidate_blocks. Invalid/NaN-scored blocks become an out-of-range
+    sentinel instead of allocating a token-sized boolean visibility mask.
+    """
+    width = logits.size(-1)
+    scores = F.pad(logits, (0, -width % block_size), value=-torch.inf)
+    scores = scores.unflatten(-1, (-1, block_size)).amax(dim=-1)
+    num_blocks = scores.size(-1)
+    last = (compress_lens - 1) // block_size
+    scores = scores.masked_fill(
+        torch.arange(num_blocks, device=logits.device) == last, torch.inf
+    )
+    top = scores.topk(min(topk_blocks, num_blocks), dim=-1)
+    ids = torch.where(top.values > -torch.inf, top.indices, num_blocks)
+    return ids.to(torch.int32).sort(dim=-1).values

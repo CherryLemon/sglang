@@ -1,8 +1,12 @@
-# DeepSeek V4.1 Flash: validated H100 PD snapshot (v9)
+# DeepSeek V4.1 Flash: H100 PD optimization
 
-This branch preserves a tested integration on top of SGLang
+The v9 checkpoint preserves a tested integration on top of SGLang
 `da64c5cbb8cf6bfd39be19da43573fdfd484c43a`. It is the checkpoint before
 further block-FP8 GEMM and compact-prefill optimization.
+
+This branch adds that next optimization step. See [V10.md](V10.md) for its
+implementation and validation; the sections below document the historical v9
+checkpoint and its configuration.
 
 ## Changes and provenance
 
@@ -20,7 +24,7 @@ further block-FP8 GEMM and compact-prefill optimization.
   [#39979](https://github.com/sgl-project/sglang/pull/39979) overlaps the chosen
   #39057 implementation and is not applied twice.
 
-The runtime files correspond to bundle SHA256
+At the v9 checkpoint, the runtime files correspond to bundle SHA256
 `34fd2da133c817f94bbe241ace4e9e4f68d6849c7320bd41652e05c35e6b89be`;
 one lab-machine comment is removed. File hashes are in `v9-manifest.json`.
 This is an experimental fork checkpoint, not an upstream support claim.
@@ -97,7 +101,7 @@ an exact per-token ITL measurement. Single-request throughput had greater
 run-to-run variance in v9. These results do not establish sustained-arrival
 SLA capacity, benchmark-suite quality, or 16 concurrent 600k requests.
 
-## Profiling-guided next work
+## Profiling findings that motivated v10
 
 Fresh warmed 1/4/16-request Nsight Systems captures and a bounded late-600k
 prefill capture identify:
