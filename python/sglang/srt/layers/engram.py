@@ -280,6 +280,15 @@ class EngramHasher(nn.Module):
                 device=input_ids.device,
             )
         mode = forward_batch.forward_mode
+        if mode.is_idle():
+            # DP MAX_LEN padding can give an idle rank nonzero token rows.
+            # Preserve their shape so the sharded table lookup still joins the
+            # collectives, but do not read request slots or commit any history.
+            return torch.zeros(
+                (num_tokens, self.primes.shape[0], self.offsets.shape[1]),
+                dtype=torch.int64,
+                device=input_ids.device,
+            )
         req_slots = forward_batch.req_pool_indices.to(torch.int64)
         bs = req_slots.shape[0]
         device = input_ids.device

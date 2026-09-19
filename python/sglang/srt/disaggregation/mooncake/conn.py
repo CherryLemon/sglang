@@ -45,6 +45,7 @@ from sglang.srt.disaggregation.common.utils import (
 from sglang.srt.disaggregation.mooncake.utils import (
     check_mooncake_custom_mem_pool_enabled,
 )
+from sglang.srt.disaggregation.dsv41_dpa_experiment import validate_c2_strides
 from sglang.srt.disaggregation.utils import (
     DisaggregationMode,
     build_transfer_entry_pairs,
@@ -1424,6 +1425,14 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                     and len(dst_indices_local) == 0
                 ):
                     continue
+                if st == StateType.C128_STATE and 2 in (
+                    getattr(self.kv_args, "mla_compression_ratios", None) or ()
+                ):
+                    try:
+                        validate_c2_strides(src_item_lens, dst_item_lens)
+                    except ValueError as error:
+                        logger.error("Rejecting incompatible C2 transfer: %s", error)
+                        return -1
                 if len(src_indices) != len(dst_indices_local):
                     # These components are position- or request-indexed:
                     # truncating silently misaligns rows and corrupts KV.

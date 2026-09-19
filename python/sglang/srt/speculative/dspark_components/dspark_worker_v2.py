@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import nullcontext
 from dataclasses import replace
 from typing import Callable, Optional, Protocol, runtime_checkable
@@ -159,11 +160,26 @@ class DSparkWorkerV2(BaseSpecWorker):
             and self._draft_is_moe
             and ps.attn_tp_size > 1
         ):
-            raise ValueError(
-                "DSpark + dp attention with a DeepSeek-V4 (MoE) draft requires "
-                "attn_tp == 1 (set --dp-size == --tp). attn_tp > 1 corrupts the "
-                "MoE-under-DP all-reduce."
+            # attn_tp > 1 used to be rejected outright because (a) the MoE-draft
+            # forward runs in the GLOBAL TP context, so an attention-width wo_b
+            # reduced across DP replicas, and (b) the pre-fix post-attention
+            # gather summed replicated hidden states. (b) is fixed upstream and
+            # (a) is fixed in models/deepseek_v4_dspark.py in this bundle. Admit
+            # only the explicitly enumerated, opt-in mixed layout with exact
+            # widths; every other combination keeps the original rejection.
+            admitted = (
+                os.environ.get("SGLANG_DSV41_EXPERIMENTAL_DPA_PD") == "1"
+                and get_parallel().tp_size == 8
+                and get_parallel().dp_size == 4
+                and ps.attn_tp_size == 2
             )
+            if not admitted:
+                raise ValueError(
+                    "DSpark + dp attention with a DeepSeek-V4 (MoE) draft requires "
+                    "attn_tp == 1 (set --dp-size == --tp) unless the opt-in "
+                    "SGLANG_DSV41_EXPERIMENTAL_DPA_PD=1 attention TP2 x DP4 layout "
+                    "(global tp8/ep8, dp4) is configured."
+                )
 
         with self._draft_context():
             bundle = build_draft_tp_worker(

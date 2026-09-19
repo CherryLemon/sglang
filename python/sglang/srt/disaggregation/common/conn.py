@@ -31,6 +31,7 @@ from sglang.srt.disaggregation.utils import (
     filter_kv_indices_for_cp_rank,
     get_dsv41_spec_layout,
 )
+from sglang.srt.disaggregation.dsv41_dpa_experiment import allow_peer_topology
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import (
@@ -678,7 +679,15 @@ class CommonKVManager(BaseKVManager):
                     "enable DSpark with the same block size and target/draft KV "
                     "layout. Upgrade both servers together."
                 )
-            if info.attn_tp_size != self.attn_tp_size:
+            if info.attn_tp_size != self.attn_tp_size and not allow_peer_topology(
+                is_mla=self.is_mla_backend,
+                local_tp=get_parallel().tp_size,
+                local_ep=get_parallel().ep_size,
+                local_attn_tp=self.attn_tp_size,
+                local_attn_dp=self.attn_dp_size,
+                remote_attn_tp=info.attn_tp_size,
+                remote_dp=info.dp_size,
+            ):
                 raise RuntimeError(
                     "DeepSeek-V4.1 DSpark PD requires the same TP size on both servers"
                 )

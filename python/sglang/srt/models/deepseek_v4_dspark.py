@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 from typing import Iterable, List, Optional, Tuple
 
 import msgspec
@@ -117,6 +118,21 @@ class DSparkAttention(MqaAttentionBase):
             wo_b_reduce_results=True,
             rope_original_seq_len=0,
         )
+        # The DSpark MoE draft runs its own forward in the GLOBAL tensor-parallel
+        # context: its MoE needs global EP semantics, so the worker deliberately
+        # does not narrow the draft to the attention-TP group
+        # (DSparkWorkerV2._draft_dp_context_enabled is False for a MoE draft).
+        # wo_b is nevertheless sharded at the attention width, so its forced
+        # reduce_results must target the attention-TP group. Left on the ambient
+        # get_tp_group() it all-reduces across every DP replica, summing
+        # different tokens; that is invisible at attn_tp==1 (size-1 no-op) and
+        # wrong at attn_tp>1. Mirrors MQALayer's explicit attn_tp_all_reduce.
+        # SGLANG_DSPARK_ATTN_TP_REDUCE=0 restores the ambient-group behaviour for
+        # live before/after reproduction; default is the corrected behaviour.
+        if get_parallel().enable_dp_attention and os.environ.get(
+            "SGLANG_DSPARK_ATTN_TP_REDUCE", "1"
+        ) != "0":
+            self.wo_b.use_dp_attention_reduce = True
         assert self.compress_ratio == 0, (
             "DSpark draft attention requires compress_ratio == 0."
         )

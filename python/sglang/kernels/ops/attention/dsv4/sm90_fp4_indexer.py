@@ -6,14 +6,14 @@ request's visible compressed positions read straight out of the fp4 indexer
 pool (e2m1 payload + e8m0 per-32 block scales, page layout of
 store_fp4_index_k_cache), summed over heads with relu and the per-head weights.
 
-Numerics follow the torch reference path (bf16 dot, bf16 relu/weight product,
-bf16 head reduction); the caller runs the same masking / candidate / top-k
-logic on the returned fp32 logits as the per-request torch loop.
+Numerics follow the torch reference path: bf16 dot, bf16 relu/weight product,
+bf16 head reduction, fp32 logits out.
 """
 
 import torch
 import triton
 import triton.language as tl
+from sglang.srt.environ import envs
 
 INDEX_HEAD_DIM = 128
 PAYLOAD_BYTES = tl.constexpr(64)
@@ -35,19 +35,35 @@ def _e2m1_decode(code):
 def _fp4_index_logits_kernel(
     q_ptr,  # [B, H, D] bf16, fq4 queries (already rope'd)
     w_ptr,  # [B, H] bf16 head weights (softmax scale folded in)
-    slots_ptr,  # [B, L] int64 pool slots per (request, compressed position)
+    slots_ptr,  # [B, L] pool slots per (request, compressed position)
+    req_to_token_ptr,  # [num_reqs, max_context_len] full-token pool slots
+    req_ptr,  # [B] request-pool row for each query
+    candidate_blocks_ptr,
     lens_ptr,  # [B] int64 visible compressed positions per request
     table_ptr,  # [num_pages, page_size * 64 + page_size * 4] uint8
     out_ptr,  # [B, L] fp32 logits, -inf beyond lens
+    candidate_scores_ptr,
+    candidate_lens_ptr,
     L,
     page_size,
     row_stride,
     stride_qb,
     stride_qh,
     stride_wb,
+    stride_req,
+    candidate_block_stride,
+    stride_out,
+    candidate_score_stride,
     H: tl.constexpr,
     HALF_D: tl.constexpr,  # D // 2 == 64 nibble-pairs per row
     BLOCK_L: tl.constexpr,
+    SKIP_INVALID: tl.constexpr,
+    RATIO: tl.constexpr,
+    USE_REQ_TO_TOKEN: tl.constexpr,
+    USE_CANDIDATE_BLOCKS: tl.constexpr,
+    CANDIDATE_BLOCK_SIZE: tl.constexpr,
+    WRITE_CANDIDATES: tl.constexpr,
+    WRITE_LOGITS: tl.constexpr,
 ):
     b = tl.program_id(0)
     lb = tl.program_id(1)
@@ -58,8 +74,45 @@ def _fp4_index_logits_kernel(
     )  # byte index i holds elements 2i (low nibble), 2i+1 (high nibble)
 
     n_vis = tl.load(lens_ptr + b)
+    if SKIP_INVALID:
+        if lb * BLOCK_L >= tl.minimum(n_vis, L):
+            if WRITE_LOGITS:
+                tl.store(out_ptr + b * stride_out + offs_l, -float("inf"), offs_l < L)
+            if WRITE_CANDIDATES:
+                nblocks = (L + CANDIDATE_BLOCK_SIZE - 1) // CANDIDATE_BLOCK_SIZE
+                block_ids = lb * (BLOCK_L // CANDIDATE_BLOCK_SIZE) + tl.arange(0, BLOCK_L // CANDIDATE_BLOCK_SIZE)
+                tl.store(candidate_scores_ptr + b * candidate_score_stride + block_ids, -float("inf"), block_ids < nblocks)
+                tl.store(candidate_lens_ptr + b, 0, mask=lb == 0)
+            return
     valid = offs_l < tl.minimum(n_vis, L)
-    slot = tl.load(slots_ptr + b * L + offs_l, mask=offs_l < L, other=0).to(tl.int64)
+    if USE_CANDIDATE_BLOCKS:
+        block_col = offs_l // CANDIDATE_BLOCK_SIZE
+        within = offs_l % CANDIDATE_BLOCK_SIZE
+        block = tl.load(
+            candidate_blocks_ptr + b * candidate_block_stride + block_col,
+            mask=valid,
+            other=0,
+        )
+        logical_position = block.to(tl.int64) * CANDIDATE_BLOCK_SIZE + within
+        req = tl.load(req_ptr + b).to(tl.int64)
+        slot = tl.load(
+            req_to_token_ptr + req * stride_req + logical_position * RATIO,
+            mask=valid,
+            other=0,
+        ).to(tl.int64)
+        slot = slot // RATIO
+    elif USE_REQ_TO_TOKEN:
+        req = tl.load(req_ptr + b).to(tl.int64)
+        slot = tl.load(
+            req_to_token_ptr + req * stride_req + offs_l.to(tl.int64) * RATIO,
+            mask=valid,
+            other=0,
+        ).to(tl.int64)
+        slot = slot // RATIO
+    else:
+        slot = tl.load(slots_ptr + b * L + offs_l, mask=offs_l < L, other=0).to(
+            tl.int64
+        )
     page = slot // page_size
     off = slot % page_size
     row_base = page * row_stride
@@ -104,7 +157,28 @@ def _fp4_index_logits_kernel(
     s = (s * w[:, None]).to(tl.bfloat16).to(tl.float32)
     logit = tl.sum(s, axis=0).to(tl.bfloat16).to(tl.float32)
     logit = tl.where(valid, logit, float("-inf"))
-    tl.store(out_ptr + b * L + offs_l, logit, mask=offs_l < L)
+    if WRITE_LOGITS:
+        tl.store(out_ptr + b * stride_out + offs_l, logit, mask=offs_l < L)
+    if WRITE_CANDIDATES:
+        blocks_per_tile: tl.constexpr = BLOCK_L // CANDIDATE_BLOCK_SIZE
+        block_scores = tl.reshape(logit, (blocks_per_tile, CANDIDATE_BLOCK_SIZE))
+        block_scores = tl.max(block_scores, axis=1)
+        block_ids = lb * blocks_per_tile + tl.arange(0, blocks_per_tile)
+        last_block = (n_vis - 1) // CANDIDATE_BLOCK_SIZE
+        block_scores = tl.where(
+            (n_vis > 0) & (block_ids == last_block), float("inf"), block_scores
+        )
+        num_blocks = (L + CANDIDATE_BLOCK_SIZE - 1) // CANDIDATE_BLOCK_SIZE
+        tl.store(
+            candidate_scores_ptr + b * candidate_score_stride + block_ids,
+            block_scores,
+            mask=block_ids < num_blocks,
+        )
+        tl.store(
+            candidate_lens_ptr + b,
+            (n_vis + CANDIDATE_BLOCK_SIZE - 1) // CANDIDATE_BLOCK_SIZE,
+            mask=lb == 0,
+        )
 
 
 def fp4_index_logits_decode(
@@ -115,7 +189,7 @@ def fp4_index_logits_decode(
     table: torch.Tensor,
     page_size: int,
 ) -> torch.Tensor:
-    """q [B, H, 128] bf16, weights [B, H], slots [B, L] int64, lens [B] int64,
+    """q [B, H, 128] bf16, weights [B, H], slots [B, L], lens [B] int64,
     table = the layer's fp4 index-K page buffer (uint8, 2D). Returns [B, L] fp32
     logits with -inf at positions >= lens."""
     assert q.dtype == torch.bfloat16 and q.shape[-1] == INDEX_HEAD_DIM
@@ -125,7 +199,10 @@ def fp4_index_logits_decode(
     q = q.contiguous()
     weights = weights.to(torch.bfloat16).contiguous()
     slots = slots.contiguous()
-    out = torch.empty((B, L), dtype=torch.float32, device=q.device)
+    out_storage = torch.empty(
+        (B, triton.cdiv(L, 4) * 4), dtype=torch.float32, device=q.device
+    )
+    out = out_storage[:, :L]
     if L == 0:
         return out
     BLOCK_L = 64
@@ -134,18 +211,403 @@ def fp4_index_logits_decode(
         q,
         weights,
         slots,
+        slots,
+        lens,
+        slots,
         lens.to(torch.int64).contiguous(),
         table,
         out,
+        out,
+        lens,
         L,
         page_size,
         table.stride(0),
         q.stride(0),
         q.stride(1),
         weights.stride(0),
+        slots.stride(0),
+        slots.stride(0),
+        out.stride(0),
+        out.stride(0),
         H=H,
         HALF_D=INDEX_HEAD_DIM // 2,
         BLOCK_L=BLOCK_L,
+        SKIP_INVALID=envs.SGLANG_OPT_DSV41_INDEXER_SKIP_INVALID_TILES.get(),
+        RATIO=1,
+        USE_REQ_TO_TOKEN=False,
+        USE_CANDIDATE_BLOCKS=False,
+        CANDIDATE_BLOCK_SIZE=1,
+        WRITE_CANDIDATES=False,
+        WRITE_LOGITS=True,
         num_warps=4,
     )
     return out
+
+
+def fp4_index_logits_req_to_token(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    req_to_token: torch.Tensor,
+    req: torch.Tensor,
+    lens: torch.Tensor,
+    table: torch.Tensor,
+    page_size: int,
+    ratio: int,
+    width: int,
+    candidate_block_size: int = 0,
+    write_logits: bool = True,
+) -> (
+    torch.Tensor
+    | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor]
+):
+    """Score logical compressed positions without materializing their pool slots."""
+    assert q.dtype == torch.bfloat16 and q.shape[-1] == INDEX_HEAD_DIM
+    B, H, _ = q.shape
+    assert req.shape == lens.shape == (B,)
+    assert req_to_token.dim() == 2 and req_to_token.stride(1) == 1
+    assert table.dtype == torch.uint8 and table.dim() == 2
+    assert ratio in (1, 2)
+    q = q.contiguous()
+    weights = weights.to(torch.bfloat16).contiguous()
+    req = req.to(torch.int64).contiguous()
+    lens = lens.to(torch.int64).contiguous()
+    output_width = triton.cdiv(width, 4) * 4 if write_logits else 4
+    out_storage = torch.empty((B, output_width), dtype=torch.float32, device=q.device)
+    out = out_storage[:, :width]
+    block_l = 64
+    if candidate_block_size:
+        assert block_l % candidate_block_size == 0
+        num_blocks = triton.cdiv(width, candidate_block_size)
+        candidate_storage = torch.empty(
+            (B, triton.cdiv(num_blocks, 4) * 4),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        candidate_scores = candidate_storage[:, :num_blocks]
+        candidate_lens = torch.empty(B, dtype=torch.int32, device=q.device)
+    else:
+        candidate_scores = out
+        candidate_lens = lens
+    if width == 0:
+        if candidate_block_size:
+            return out, candidate_scores, candidate_lens
+        return out
+    grid = (B, triton.cdiv(width, block_l))
+    _fp4_index_logits_kernel[grid](
+        q,
+        weights,
+        req_to_token,
+        req_to_token,
+        req,
+        req_to_token,
+        lens,
+        table,
+        out,
+        candidate_scores,
+        candidate_lens,
+        width,
+        page_size,
+        table.stride(0),
+        q.stride(0),
+        q.stride(1),
+        weights.stride(0),
+        req_to_token.stride(0),
+        req_to_token.stride(0),
+        out.stride(0),
+        candidate_scores.stride(0),
+        H=H,
+        HALF_D=INDEX_HEAD_DIM // 2,
+        BLOCK_L=block_l,
+        SKIP_INVALID=envs.SGLANG_OPT_DSV41_INDEXER_SKIP_INVALID_TILES.get(),
+        RATIO=ratio,
+        USE_REQ_TO_TOKEN=True,
+        USE_CANDIDATE_BLOCKS=False,
+        CANDIDATE_BLOCK_SIZE=candidate_block_size or 1,
+        WRITE_CANDIDATES=bool(candidate_block_size),
+        WRITE_LOGITS=write_logits,
+        num_warps=4,
+    )
+    if not write_logits:
+        assert candidate_block_size
+        return candidate_scores, candidate_lens
+    if candidate_block_size:
+        return out, candidate_scores, candidate_lens
+    return out
+
+
+def fp4_index_logits_candidate_blocks(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    req_to_token: torch.Tensor,
+    req: torch.Tensor,
+    candidate_blocks: torch.Tensor,
+    candidate_lens: torch.Tensor,
+    table: torch.Tensor,
+    page_size: int,
+    ratio: int,
+    candidate_block_size: int,
+) -> torch.Tensor:
+    """Score compact candidate blocks while resolving physical slots in-kernel."""
+    assert q.dtype == torch.bfloat16 and q.shape[-1] == INDEX_HEAD_DIM
+    batch, heads, _ = q.shape
+    assert req.shape == candidate_lens.shape == (batch,)
+    assert candidate_blocks.shape[0] == batch
+    assert req_to_token.dim() == 2 and req_to_token.stride(1) == 1
+    assert table.dtype == torch.uint8 and table.dim() == 2
+    assert ratio in (1, 2)
+    q = q.contiguous()
+    weights = weights.to(torch.bfloat16).contiguous()
+    req = req.to(torch.int64).contiguous()
+    candidate_lens = candidate_lens.to(torch.int32).contiguous()
+    candidate_blocks = candidate_blocks.to(torch.int32).contiguous()
+    width = candidate_blocks.shape[1] * candidate_block_size
+    out_storage = torch.empty(
+        (batch, triton.cdiv(width, 4) * 4),
+        dtype=torch.float32,
+        device=q.device,
+    )
+    out = out_storage[:, :width]
+    if width == 0:
+        return out
+    block_l = 64
+    _fp4_index_logits_kernel[(batch, triton.cdiv(width, block_l))](
+        q,
+        weights,
+        candidate_blocks,
+        req_to_token,
+        req,
+        candidate_blocks,
+        candidate_lens,
+        table,
+        out,
+        out,
+        candidate_lens,
+        width,
+        page_size,
+        table.stride(0),
+        q.stride(0),
+        q.stride(1),
+        weights.stride(0),
+        req_to_token.stride(0),
+        candidate_blocks.stride(0),
+        out.stride(0),
+        out.stride(0),
+        H=heads,
+        HALF_D=INDEX_HEAD_DIM // 2,
+        BLOCK_L=block_l,
+        SKIP_INVALID=envs.SGLANG_OPT_DSV41_INDEXER_SKIP_INVALID_TILES.get(),
+        RATIO=ratio,
+        USE_REQ_TO_TOKEN=False,
+        USE_CANDIDATE_BLOCKS=True,
+        CANDIDATE_BLOCK_SIZE=candidate_block_size,
+        WRITE_CANDIDATES=False,
+        WRITE_LOGITS=True,
+        num_warps=4,
+    )
+    return out
+
+
+@triton.jit
+def _unpack_fp4_index_keys_to_fp8_kernel(
+    slots_ptr,
+    table_ptr,
+    out_ptr,
+    page_size,
+    row_stride,
+    HALF_D: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+):
+    """Decode block-scaled E2M1 values directly into E4M3."""
+    row = tl.program_id(0)
+    offs_i = tl.arange(0, HALF_D)
+    slot = tl.load(slots_ptr + row).to(tl.int64)
+    page = slot // page_size
+    off = slot % page_size
+    row_base = page * row_stride
+    pay = tl.load(table_ptr + row_base + off * PAYLOAD_BYTES + offs_i)
+    scale_block = offs_i // 16
+    exps = tl.load(
+        table_ptr
+        + row_base
+        + page_size * PAYLOAD_BYTES
+        + off * SCALE_BYTES
+        + scale_block
+    )
+    scale = tl.exp2(exps.to(tl.float32) - 127.0)
+    low = tl.clamp(_e2m1_decode(pay & 0x0F) * scale, -FP8_MAX, FP8_MAX).to(
+        out_ptr.dtype.element_ty
+    )
+    high = tl.clamp(
+        _e2m1_decode((pay >> 4) & 0x0F) * scale,
+        -FP8_MAX,
+        FP8_MAX,
+    ).to(out_ptr.dtype.element_ty)
+    out = out_ptr + row * (HALF_D * 2)
+    tl.store(out + 2 * offs_i, low)
+    tl.store(out + 2 * offs_i + 1, high)
+
+
+def unpack_fp4_index_keys_to_fp8(
+    slots: torch.Tensor,
+    table: torch.Tensor,
+    page_size: int,
+) -> torch.Tensor:
+    """Gather FP4 index-K rows and decode them directly into E4M3."""
+    assert slots.dim() == 1
+    assert table.dtype == torch.uint8 and table.dim() == 2
+    slots = slots.to(torch.int64).contiguous()
+    values = torch.empty(
+        (slots.shape[0], INDEX_HEAD_DIM),
+        dtype=torch.float8_e4m3fn,
+        device=slots.device,
+    )
+    if slots.numel() > 0:
+        _unpack_fp4_index_keys_to_fp8_kernel[(slots.shape[0],)](
+            slots,
+            table,
+            values,
+            page_size,
+            table.stride(0),
+            HALF_D=INDEX_HEAD_DIM // 2,
+            FP8_MAX=FP8_E4M3_MAX,
+            num_warps=4,
+        )
+    return values
+
+
+@triton.jit
+def _quantize_bf16_index_queries_fp8_kernel(
+    q_ptr,
+    out_ptr,
+    stride_qb,
+    stride_qh,
+    stride_ob,
+    stride_oh,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+):
+    row = tl.program_id(0)
+    offs_h = tl.arange(0, H)
+    offs_d = tl.arange(0, D)
+    q = tl.load(
+        q_ptr + row * stride_qb + offs_h[:, None] * stride_qh + offs_d[None, :]
+    ).to(tl.float32)
+    q_fp8 = tl.clamp(q, -FP8_MAX, FP8_MAX).to(out_ptr.dtype.element_ty)
+    tl.store(
+        out_ptr + row * stride_ob + offs_h[:, None] * stride_oh + offs_d[None, :],
+        q_fp8,
+    )
+
+
+def quantize_bf16_index_queries_fp8(
+    q: torch.Tensor,
+) -> torch.Tensor:
+    """Cast each BF16 query head to E4M3 for one K=128 tensor-core dot."""
+    assert q.dtype == torch.bfloat16 and q.shape[-1] == INDEX_HEAD_DIM
+    q = q.contiguous()
+    rows, heads, _ = q.shape
+    values = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    if rows > 0:
+        _quantize_bf16_index_queries_fp8_kernel[(rows,)](
+            q,
+            values,
+            q.stride(0),
+            q.stride(1),
+            values.stride(0),
+            values.stride(1),
+            H=heads,
+            D=INDEX_HEAD_DIM,
+            FP8_MAX=FP8_E4M3_MAX,
+            num_warps=8,
+        )
+    return values
+
+
+@triton.jit
+def _fp8_index_logits_prefill_kernel(
+    q_ptr,  # [B, H, D] e4m3
+    w_ptr,  # [B, H] bf16
+    k_ptr,  # [L, D] e4m3
+    lens_ptr,  # [B] int64
+    out_ptr,  # [B, OUT_L] fp32
+    L,
+    OUT_L,
+    stride_qb,
+    stride_qh,
+    stride_kl,
+    stride_wb,
+    H: tl.constexpr,
+    D: tl.constexpr,
+    BLOCK_L: tl.constexpr,
+):
+    b = tl.program_id(0)
+    lb = tl.program_id(1)
+    offs_l = lb * BLOCK_L + tl.arange(0, BLOCK_L)
+    offs_h = tl.arange(0, H)
+    offs_d = tl.arange(0, D)
+    n_vis = tl.load(lens_ptr + b)
+    valid = offs_l < tl.minimum(n_vis, L)
+    q = tl.load(q_ptr + b * stride_qb + offs_h[:, None] * stride_qh + offs_d[None, :])
+    k = tl.load(
+        k_ptr + offs_l[:, None] * stride_kl + offs_d[None, :],
+        mask=valid[:, None],
+        other=0.0,
+    )
+    acc = tl.dot(q, tl.trans(k), out_dtype=tl.float32)
+    # Preserve the reference post-dot rounding and reduction points.
+    s = acc.to(tl.bfloat16).to(tl.float32)
+    s = tl.maximum(s, 0.0)
+    w = tl.load(w_ptr + b * stride_wb + offs_h).to(tl.float32)
+    s = (s * w[:, None]).to(tl.bfloat16).to(tl.float32)
+    logit = tl.sum(s, axis=0).to(tl.bfloat16).to(tl.float32)
+    logit = tl.where(valid, logit, float("-inf"))
+    tl.store(out_ptr + b * OUT_L + offs_l, logit, mask=offs_l < OUT_L)
+
+
+def fp8_index_logits_prefill(
+    q: torch.Tensor,
+    weights: torch.Tensor,
+    keys: torch.Tensor,
+    lens: torch.Tensor,
+) -> torch.Tensor:
+    """Score E4M3 queries against E4M3 keys with FP32 accumulation.
+
+    Output rows are padded to four floats for the fused ragged top-k kernel;
+    padding remains unreachable because it is initialized to ``-inf``.
+    """
+    assert q.dtype == torch.float8_e4m3fn and q.shape[-1] == INDEX_HEAD_DIM
+    rows, heads, _ = q.shape
+    width = keys.shape[0]
+    assert keys.dtype == torch.float8_e4m3fn and keys.shape[1:] == (INDEX_HEAD_DIM,)
+    assert weights.shape == (rows, heads)
+    assert lens.shape == (rows,)
+    q = q.contiguous()
+    weights = weights.to(torch.bfloat16).contiguous()
+    keys = keys.contiguous()
+    out_width = ((width + 3) // 4) * 4
+    out = torch.empty((rows, out_width), dtype=torch.float32, device=q.device)
+    if rows == 0 or width == 0:
+        return out
+    block_l = 64
+    _fp8_index_logits_prefill_kernel[(rows, triton.cdiv(out_width, block_l))](
+        q,
+        weights,
+        keys,
+        lens.to(torch.int64).contiguous(),
+        out,
+        width,
+        out_width,
+        q.stride(0),
+        q.stride(1),
+        keys.stride(0),
+        weights.stride(0),
+        H=heads,
+        D=INDEX_HEAD_DIM,
+        BLOCK_L=block_l,
+        num_warps=4,
+    )
+    return out
+
+FP8_E4M3_MAX = 448.0

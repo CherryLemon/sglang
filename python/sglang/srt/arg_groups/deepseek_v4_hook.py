@@ -289,6 +289,9 @@ def validate_deepseek_v41_features(server_args: ServerArgs) -> None:
             )
 
     if cfg.disaggregation_mode != "null" and cfg.speculative_algorithm is not None:
+        from sglang.srt.disaggregation.dsv41_dpa_experiment import (
+            allow_decode_config,
+        )
         from sglang.srt.speculative.ragged_verify import (
             RaggedVerifyMode,
             read_ragged_verify_mode,
@@ -297,8 +300,10 @@ def validate_deepseek_v41_features(server_args: ServerArgs) -> None:
         if (
             read_ragged_verify_mode() is not RaggedVerifyMode.STATIC
             or cfg.disaggregation_transfer_backend != "mooncake"
-            or cfg.dp_size != 1
-            or cfg.enable_dp_attention
+            or (
+                (cfg.dp_size != 1 or cfg.enable_dp_attention)
+                and not allow_decode_config(cfg)
+            )
             or cfg.attn_cp_size != 1
             or cfg.dcp_size != 1
             or cfg.enable_prefill_context_parallel

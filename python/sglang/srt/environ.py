@@ -1403,6 +1403,12 @@ class Envs:
     # Run the DeepSeek-V4.1 ratio-1/2 prefill indexer on the torch path instead
     # of the DeepGEMM dense fp4 logits kernel (test oracle / fallback).
     SGLANG_DSV41_TORCH_PREFILL_INDEXER = EnvBool(False)
+    # SM90 decode indexer scoring: skip the recomputation of FP4 tiles that lie
+    # wholly beyond the request's device-side visible length and write their -inf
+    # directly. Numerically identical; default off (A/B switch).
+    SGLANG_OPT_DSV41_INDEXER_SKIP_INVALID_TILES = EnvBool(False)
+    # Use the optional DeepSelect SM90 kernel for candidate-block FP32 Top-K.
+    SGLANG_OPT_DSV41_DEEPSELECT_CANDIDATE_TOPK = EnvBool(False)
     # Keep the DeepSeek-V4.1 engram tables in host memory (layout below) and gather
     # rows from the GPU instead of sharding them over HBM.
     SGLANG_ENABLE_DSV41_ENGRAM_HOST_TABLE = EnvBool(False)
