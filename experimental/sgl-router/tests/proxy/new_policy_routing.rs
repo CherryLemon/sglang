@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -12,11 +12,12 @@ use sgl_router::buckets_reorg::{Bucket, BucketGroups, BucketResolver, EngineGrou
 use sgl_router::config::PolicyKind;
 use sgl_router::discovery::{ModelId, WorkerId, WorkerMode, WorkerSpec};
 use sgl_router::policies::PolicyRegistry;
-use sgl_router::policies_reorg::admission::{AllowAll, EngineAdmission, InFlightLimit};
+use sgl_router::policies_reorg::admission::{AdmissionConfig, EngineAdmission};
 use sgl_router::policies_reorg::power_of_two::PowerOfTwoPolicy;
 use sgl_router::proxy::Proxy;
 use sgl_router::server::app::build_router;
 use sgl_router::server::app_context::{AppContext, ChatRouting};
+use sgl_router::state::load_monitor::engine_load::LoadStat;
 use sgl_router::tokenizer::TokenizerRegistry;
 use sgl_router::workers::WorkerRegistry;
 use tower::ServiceExt;
@@ -41,13 +42,36 @@ fn context(workers: &[(&str, &MockWorker, WorkerMode)]) -> AppContext {
             })
             .unwrap();
     }
-    AppContext::new(
+    let ctx = AppContext::new(
         config,
         tokenizers,
         Arc::new(Proxy::new(Duration::from_secs(5)).unwrap()),
         registry,
         Arc::new(PolicyRegistry::default()),
-    )
+    );
+    // Configured capacity checks engine reports, independently of local guards.
+    for (_, worker, _) in workers {
+        ctx.engine_load.set(
+            &worker.url,
+            0,
+            LoadStat {
+                num_running_reqs: 0,
+                num_waiting_reqs: 0,
+                num_tokens: 0,
+                max_total_num_tokens: 1000,
+                native_cache: None,
+            },
+            Instant::now(),
+        );
+    }
+    ctx
+}
+
+fn capacity(max_running_requests: u64) -> AdmissionConfig {
+    AdmissionConfig::RunningPlusKvCapacity {
+        max_running_requests,
+        max_kv_tokens: 1000,
+    }
 }
 
 fn group(ctx: &AppContext, ids: &[&str], admission: impl EngineAdmission + 'static) -> EngineGroup {
@@ -96,7 +120,7 @@ async fn new_policy_selects_lower_load_and_forwards_json_and_sse() {
     let _busy = busy_worker.load_guard();
     let mut bucket = Bucket::new(
         "two-tokens",
-        BucketGroups::Plain(group(&ctx, &["busy", "idle"], AllowAll)),
+        BucketGroups::Plain(group(&ctx, &["busy", "idle"], AdmissionConfig::default())),
     );
     bucket.max_context_tokens = Some(2);
     bucket.limits = TokenLimits {
@@ -149,16 +173,16 @@ async fn new_policy_pd_selects_one_bucket_and_reuses_bootstrap_forwarding() {
     let mut short = Bucket::new(
         "short",
         BucketGroups::Pd {
-            prefill: group(&ctx, &["short-p"], AllowAll),
-            decode: group(&ctx, &["short-d"], AllowAll),
+            prefill: group(&ctx, &["short-p"], AdmissionConfig::default()),
+            decode: group(&ctx, &["short-d"], AdmissionConfig::default()),
         },
     );
     short.max_context_tokens = Some(2);
     let long = Bucket::new(
         "long",
         BucketGroups::Pd {
-            prefill: group(&ctx, &["long-p"], AllowAll),
-            decode: group(&ctx, &["long-d"], AllowAll),
+            prefill: group(&ctx, &["long-p"], AdmissionConfig::default()),
+            decode: group(&ctx, &["long-d"], AdmissionConfig::default()),
         },
     );
     let (ctx, app) = router(ctx, vec![short, long]);
@@ -199,7 +223,7 @@ async fn new_policy_admission_rejection_returns_503_without_dispatch() {
     let ctx = context(&[("w", &worker, WorkerMode::Plain)]);
     let bucket = Bucket::new(
         "full",
-        BucketGroups::Plain(group(&ctx, &["w"], InFlightLimit(0))),
+        BucketGroups::Plain(group(&ctx, &["w"], capacity(0))),
     );
     let (ctx, app) = router(ctx, vec![bucket]);
     let response = app.oneshot(request(chat(false))).await.unwrap();
@@ -227,15 +251,15 @@ async fn new_policy_decode_admission_rejection_retries_the_entire_bucket() {
     let rejected = Bucket::new(
         "a-rejected",
         BucketGroups::Pd {
-            prefill: group(&ctx, &["p1"], AllowAll),
-            decode: group(&ctx, &["d1"], InFlightLimit(0)),
+            prefill: group(&ctx, &["p1"], AdmissionConfig::default()),
+            decode: group(&ctx, &["d1"], capacity(0)),
         },
     );
     let accepted = Bucket::new(
         "b-accepted",
         BucketGroups::Pd {
-            prefill: group(&ctx, &["p2"], AllowAll),
-            decode: group(&ctx, &["d2"], InFlightLimit(1)),
+            prefill: group(&ctx, &["p2"], AdmissionConfig::default()),
+            decode: group(&ctx, &["d2"], capacity(1)),
         },
     );
     let (_, app) = router(ctx, vec![rejected, accepted]);
@@ -260,7 +284,7 @@ async fn new_policy_invalid_requests_fail_before_dispatch() {
     let ctx = context(&[("w", &worker, WorkerMode::Plain)]);
     let bucket = Bucket::new(
         "default",
-        BucketGroups::Plain(group(&ctx, &["w"], AllowAll)),
+        BucketGroups::Plain(group(&ctx, &["w"], AdmissionConfig::default())),
     );
     let (ctx, app) = router(ctx, vec![bucket]);
     let mut unknown = chat(false);

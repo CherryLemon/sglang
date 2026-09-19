@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::fmt::Debug;
-use std::sync::Arc;
 
-use crate::state::load_monitor::engine_load::{EngineWorkerLoad, NativeCacheWorkerLoad};
+use serde::{Deserialize, Serialize};
+
+use crate::state::load_monitor::engine_load::EngineLoadSnapshot;
 use crate::workers::Worker;
 
 use super::{PickError, PickRequest};
@@ -15,124 +16,92 @@ pub enum Decision {
     Reject(String),
 }
 
-/// The selected engine's reports from the snapshot used by selection.
-/// Missing, stale, or incomplete reports remain `None`, never zero load.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct AdmissionLoad<'a> {
-    pub reported: Option<&'a EngineWorkerLoad>,
-    pub native: Option<&'a NativeCacheWorkerLoad>,
+/// Measurements for the selected engine, retained from selection's snapshot.
+/// Missing, stale, or incomplete measurements remain unknown, never zero.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AdmissionState {
+    pub running_requests: Option<u64>,
+    /// Total KV footprint, not just the occupied KV tokens in basic reports.
+    pub kv_tokens: Option<u64>,
 }
 
-/// Checks one engine using the load observations retained by selection.
-/// Each check defines its missing-data behavior and owns any other state handles it needs.
+impl AdmissionState {
+    pub fn from_snapshot(snapshot: &EngineLoadSnapshot, engine: &Worker) -> Self {
+        Self {
+            running_requests: snapshot
+                .fresh_load_for_url(&engine.url)
+                .map(|load| load.num_running_reqs),
+            kv_tokens: snapshot
+                .fresh_native_cache_load_for_url(&engine.url)
+                .map(|load| load.num_total_tokens),
+        }
+    }
+}
+
+/// Checks one engine using the measurements retained by selection.
+/// `None` means no usable measurement, never zero load. Each check defines
+/// its missing-data behavior and owns any other state handles it needs.
 /// Each policy decides when to check an engine and how to handle rejection.
 pub trait EngineAdmission: Send + Sync + Debug {
     fn check(
         &self,
         engine: &Worker,
         request: &PickRequest<'_>,
-        load: AdmissionLoad<'_>,
+        state: AdmissionState,
     ) -> Result<Decision, PickError>;
 }
 
-#[derive(Debug)]
-pub struct AllowAll;
+/// Each admission name carries only the limits used by that rule.
+/// Limits are absolute, per-engine caps (aggregated across its DP ranks).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "name", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AdmissionConfig {
+    AllowAll {},
+    RunningPlusKvCapacity {
+        max_running_requests: u64,
+        max_kv_tokens: u64,
+    },
+}
 
-impl EngineAdmission for AllowAll {
-    fn check(
-        &self,
-        _: &Worker,
-        _: &PickRequest<'_>,
-        _: AdmissionLoad<'_>,
-    ) -> Result<Decision, PickError> {
-        Ok(Decision::Allow)
+impl Default for AdmissionConfig {
+    fn default() -> Self {
+        Self::AllowAll {}
     }
 }
 
-impl Decision {
-    fn from(allowed: bool, reason: &str) -> Self {
-        if allowed {
-            Self::Allow
-        } else {
-            Self::Reject(reason.into())
-        }
-    }
-}
-
-/// Engine-reported running and KV capacity; admits without a fresh native sample.
-#[derive(Debug)]
-pub struct Capacity;
-
-impl EngineAdmission for Capacity {
+impl EngineAdmission for AdmissionConfig {
     fn check(
         &self,
         _: &Worker,
         request: &PickRequest<'_>,
-        load: AdmissionLoad<'_>,
+        state: AdmissionState,
     ) -> Result<Decision, PickError> {
-        let fits = load.native.is_none_or(|load| {
-            load.num_running_reqs < load.max_running_requests
-                && load
-                    .num_total_tokens
-                    .checked_add(request.kv_tokens())
-                    .is_some_and(|projected| projected <= load.max_total_num_tokens)
-        });
-        Ok(Decision::from(fits, "kv_capacity"))
-    }
-}
+        let Self::RunningPlusKvCapacity {
+            max_running_requests,
+            max_kv_tokens,
+        } = self
+        else {
+            return Ok(Decision::Allow);
+        };
 
-/// Router-local in-flight requests must stay below the limit.
-#[derive(Debug)]
-pub struct InFlightLimit(pub usize);
-
-impl EngineAdmission for InFlightLimit {
-    fn check(
-        &self,
-        engine: &Worker,
-        _: &PickRequest<'_>,
-        _: AdmissionLoad<'_>,
-    ) -> Result<Decision, PickError> {
-        Ok(Decision::from(
-            engine.active_load() < self.0,
-            "in_flight_limit",
-        ))
-    }
-}
-
-/// Engine-reported waiting requests must stay below the limit; admits without a sample.
-#[derive(Debug)]
-pub struct QueueLimit(pub u64);
-
-impl EngineAdmission for QueueLimit {
-    fn check(
-        &self,
-        _: &Worker,
-        _: &PickRequest<'_>,
-        load: AdmissionLoad<'_>,
-    ) -> Result<Decision, PickError> {
-        let below = load
-            .reported
-            .is_none_or(|load| load.num_waiting_reqs < self.0);
-        Ok(Decision::from(below, "queue_limit"))
-    }
-}
-
-/// Every check must admit; the first rejection or error stops evaluation.
-#[derive(Debug)]
-pub struct AllOf(pub Vec<Arc<dyn EngineAdmission>>);
-
-impl EngineAdmission for AllOf {
-    fn check(
-        &self,
-        engine: &Worker,
-        request: &PickRequest<'_>,
-        load: AdmissionLoad<'_>,
-    ) -> Result<Decision, PickError> {
-        for check in &self.0 {
-            if let rejected @ Decision::Reject(_) = check.check(engine, request, load)? {
-                return Ok(rejected);
-            }
+        // Include this request. Comparing before addition avoids running-count
+        // overflow, while checked_add rejects an overflowing KV projection.
+        if state
+            .running_requests
+            .is_some_and(|running| running >= *max_running_requests)
+        {
+            return Ok(Decision::Reject("running_capacity".into()));
         }
+        let request_tokens = request.kv_tokens();
+        if state.kv_tokens.is_some_and(|tokens| {
+            tokens
+                .checked_add(request_tokens)
+                .is_none_or(|projected| projected > *max_kv_tokens)
+        }) {
+            return Ok(Decision::Reject("kv_capacity".into()));
+        }
+        // Preserve fail-open behavior for unavailable measurements. A known
+        // measurement is still checked when the other one is unavailable.
         Ok(Decision::Allow)
     }
 }

@@ -8,7 +8,9 @@ use sgl_router::buckets_reorg::{
     Bucket, BucketGroups, BucketRequest, BucketResolver, EngineGroup, TokenLimits,
 };
 use sgl_router::discovery::{ModelId, WorkerId, WorkerSpec};
-use sgl_router::policies_reorg::admission::{AdmissionLoad, AllowAll, Decision, EngineAdmission};
+use sgl_router::policies_reorg::admission::{
+    AdmissionConfig, AdmissionState, Decision, EngineAdmission,
+};
 use sgl_router::policies_reorg::{Pick, PickError, PickRequest, Policy, Rejection, Stage};
 use sgl_router::workers::{Worker, WorkerRegistry};
 
@@ -24,7 +26,7 @@ struct TestPolicy {
 impl Default for TestPolicy {
     fn default() -> Self {
         Self {
-            admission: Arc::new(AllowAll),
+            admission: Arc::new(AdmissionConfig::default()),
             result: None,
             miss: false,
             invalid: false,
@@ -53,7 +55,7 @@ impl Policy for TestPolicy {
             let engine = self.result.clone().unwrap_or_else(|| engines[0].clone());
             if let Decision::Reject(reason) =
                 self.admission
-                    .check(&engine, request, AdmissionLoad::default())?
+                    .check(&engine, request, AdmissionState::default())?
             {
                 return Err(PickError::AdmissionRejected(Rejection {
                     engine: engine.id.clone(),
@@ -76,7 +78,7 @@ impl EngineAdmission for Reject {
         &self,
         engine: &Worker,
         _: &PickRequest<'_>,
-        _: AdmissionLoad<'_>,
+        _: AdmissionState,
     ) -> Result<Decision, PickError> {
         Ok(if engine.id.0 == self.0 {
             Decision::Reject("full".into())
@@ -438,7 +440,7 @@ async fn power_of_two_checks_selected_engine_and_propagates_rejection_without_fa
             &self,
             engine: &Worker,
             _: &PickRequest<'_>,
-            _: AdmissionLoad<'_>,
+            _: AdmissionState,
         ) -> Result<Decision, PickError> {
             self.calls.lock().unwrap().push(engine.id.clone());
             if self.invalid {
