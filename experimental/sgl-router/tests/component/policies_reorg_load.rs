@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use sgl_router::discovery::{ModelId, WorkerId, WorkerSpec};
-use sgl_router::policies_reorg::admission::{AdmissionState, Decision, EngineAdmission};
+use sgl_router::policies_reorg::admission::{
+    AdmissionContext, AdmissionMetric, Decision, EngineAdmission,
+};
 use sgl_router::policies_reorg::power_of_two::PowerOfTwoPolicy;
 use sgl_router::policies_reorg::{PickError, PickRequest, Policy, Stage};
 use sgl_router::state::load_monitor::engine_load::{EngineLoadTable, LoadStat};
@@ -41,21 +43,19 @@ fn engine() -> Arc<Worker> {
 #[derive(Debug)]
 struct ObserveAdmission {
     table: Arc<EngineLoadTable>,
-    observations: Mutex<Vec<AdmissionState>>,
+    observations: Mutex<Vec<Option<u64>>>,
 }
 
 impl EngineAdmission for ObserveAdmission {
-    fn check(
-        &self,
-        engine: &Worker,
-        _: &PickRequest<'_>,
-        state: AdmissionState,
-    ) -> Result<Decision, PickError> {
-        assert_eq!(engine.url, URL);
+    fn check(&self, context: &AdmissionContext<'_>) -> Result<Decision, PickError> {
+        assert_eq!(context.engine.url, URL);
         // A new report arriving after selection must not change the observation
         // supplied to admission. The next pick should read the new report.
         report(&self.table, 0, 99, Instant::now());
-        self.observations.lock().unwrap().push(state);
+        self.observations
+            .lock()
+            .unwrap()
+            .push(context.current(AdmissionMetric::RunningRequests));
         Ok(Decision::Allow)
     }
 }
@@ -93,14 +93,8 @@ async fn selected_load_reaches_admission_and_next_pick_reads_fresh_state() {
     }
     let observations = admission.observations.lock().unwrap();
     assert_eq!(observations.len(), 2);
-    assert_eq!(
-        observations[0],
-        AdmissionState {
-            running_requests: Some(4),
-            kv_tokens: None,
-        }
-    );
-    assert_eq!(observations[1].running_requests, Some(102));
+    assert_eq!(observations[0], Some(4));
+    assert_eq!(observations[1], Some(102));
 }
 
 #[tokio::test]
@@ -128,10 +122,6 @@ async fn missing_stale_and_incomplete_reports_reach_admission_as_unknown() {
             .pick(&[engine()], &PickRequest::new(&model, Stage::Plain, 10))
             .await
             .unwrap();
-        assert_eq!(
-            *admission.observations.lock().unwrap(),
-            [AdmissionState::default()],
-            "{case}"
-        );
+        assert_eq!(*admission.observations.lock().unwrap(), [None], "{case}");
     }
 }

@@ -9,9 +9,10 @@ use sgl_router::buckets_reorg::{
 };
 use sgl_router::discovery::{ModelId, WorkerId, WorkerSpec};
 use sgl_router::policies_reorg::admission::{
-    AdmissionConfig, AdmissionState, Decision, EngineAdmission,
+    AdmissionConfig, AdmissionContext, Decision, EngineAdmission,
 };
 use sgl_router::policies_reorg::{Pick, PickError, PickRequest, Policy, Rejection, Stage};
+use sgl_router::state::load_monitor::engine_load::EngineLoadSnapshot;
 use sgl_router::workers::{Worker, WorkerRegistry};
 
 #[derive(Debug)]
@@ -53,10 +54,11 @@ impl Policy for TestPolicy {
                 return Err(PickError::NoCandidates);
             }
             let engine = self.result.clone().unwrap_or_else(|| engines[0].clone());
-            if let Decision::Reject(reason) =
-                self.admission
-                    .check(&engine, request, AdmissionState::default())?
-            {
+            if let Decision::Reject(reason) = self.admission.check(&AdmissionContext::new(
+                &engine,
+                request,
+                &EngineLoadSnapshot::default(),
+            ))? {
                 return Err(PickError::AdmissionRejected(Rejection {
                     engine: engine.id.clone(),
                     reason,
@@ -74,13 +76,8 @@ impl Policy for TestPolicy {
 struct Reject(&'static str);
 
 impl EngineAdmission for Reject {
-    fn check(
-        &self,
-        engine: &Worker,
-        _: &PickRequest<'_>,
-        _: AdmissionState,
-    ) -> Result<Decision, PickError> {
-        Ok(if engine.id.0 == self.0 {
+    fn check(&self, context: &AdmissionContext<'_>) -> Result<Decision, PickError> {
+        Ok(if context.engine.id.0 == self.0 {
             Decision::Reject("full".into())
         } else {
             Decision::Allow
@@ -436,13 +433,8 @@ async fn power_of_two_checks_selected_engine_and_propagates_rejection_without_fa
     }
 
     impl EngineAdmission for Check {
-        fn check(
-            &self,
-            engine: &Worker,
-            _: &PickRequest<'_>,
-            _: AdmissionState,
-        ) -> Result<Decision, PickError> {
-            self.calls.lock().unwrap().push(engine.id.clone());
+        fn check(&self, context: &AdmissionContext<'_>) -> Result<Decision, PickError> {
+            self.calls.lock().unwrap().push(context.engine.id.clone());
             if self.invalid {
                 Err(PickError::InvalidSignal("admission input".into()))
             } else if self.reject {

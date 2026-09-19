@@ -7,10 +7,11 @@ use futures::future::BoxFuture;
 use sgl_router::buckets_reorg::{Bucket, BucketGroups, BucketResolver, EngineGroup};
 use sgl_router::policies::PolicyRegistry;
 use sgl_router::policies_reorg::admission::{
-    AdmissionConfig, AdmissionState, Decision, EngineAdmission,
+    AdmissionConfig, AdmissionContext, Decision, EngineAdmission,
 };
 use sgl_router::policies_reorg::{Pick, PickError, PickRequest, Policy, Rejection, Stage};
 use sgl_router::server::app_context::ChatRouting;
+use sgl_router::state::load_monitor::engine_load::EngineLoadSnapshot;
 use std::sync::Mutex;
 
 type PickCall = (String, Stage, u64, Option<u64>);
@@ -57,10 +58,11 @@ impl Policy for FirstPolicy {
                 return Err(PickError::NoCandidates);
             }
             let engine = engines[0].clone();
-            if let Decision::Reject(reason) =
-                self.admission
-                    .check(&engine, request, AdmissionState::default())?
-            {
+            if let Decision::Reject(reason) = self.admission.check(&AdmissionContext::new(
+                &engine,
+                request,
+                &EngineLoadSnapshot::default(),
+            ))? {
                 return Err(PickError::AdmissionRejected(Rejection {
                     engine: engine.id.clone(),
                     reason,
@@ -78,12 +80,7 @@ impl Policy for FirstPolicy {
 struct RejectAll;
 
 impl EngineAdmission for RejectAll {
-    fn check(
-        &self,
-        _: &Worker,
-        _: &PickRequest<'_>,
-        _: AdmissionState,
-    ) -> Result<Decision, PickError> {
+    fn check(&self, _: &AdmissionContext<'_>) -> Result<Decision, PickError> {
         Ok(Decision::Reject("full".into()))
     }
 }

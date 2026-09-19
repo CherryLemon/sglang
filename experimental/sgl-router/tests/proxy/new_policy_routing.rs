@@ -17,7 +17,7 @@ use sgl_router::policies_reorg::power_of_two::PowerOfTwoPolicy;
 use sgl_router::proxy::Proxy;
 use sgl_router::server::app::build_router;
 use sgl_router::server::app_context::{AppContext, ChatRouting};
-use sgl_router::state::load_monitor::engine_load::LoadStat;
+use sgl_router::state::load_monitor::engine_load::{EngineLoadTable, LoadStat};
 use sgl_router::tokenizer::TokenizerRegistry;
 use sgl_router::workers::WorkerRegistry;
 use tower::ServiceExt;
@@ -218,12 +218,19 @@ async fn new_policy_pd_selects_one_bucket_and_reuses_bootstrap_forwarding() {
 }
 
 #[tokio::test]
-async fn new_policy_admission_rejection_returns_503_without_dispatch() {
+async fn new_policy_inflight_rejection_works_without_telemetry_or_dispatch() {
     let worker = MockWorker::start(vec![]).await;
-    let ctx = context(&[("w", &worker, WorkerMode::Plain)]);
+    let mut ctx = context(&[("w", &worker, WorkerMode::Plain)]);
+    ctx.engine_load = EngineLoadTable::new();
+    let engine = ctx.registry.get(&WorkerId("w".into())).unwrap();
+    let _busy = engine.load_guard();
     let bucket = Bucket::new(
         "full",
-        BucketGroups::Plain(group(&ctx, &["w"], capacity(0))),
+        BucketGroups::Plain(group(
+            &ctx,
+            &["w"],
+            AdmissionConfig::InFlightLimit { max_in_flight: 1 },
+        )),
     );
     let (ctx, app) = router(ctx, vec![bucket]);
     let response = app.oneshot(request(chat(false))).await.unwrap();
