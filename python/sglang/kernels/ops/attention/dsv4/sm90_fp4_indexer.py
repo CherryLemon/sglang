@@ -545,9 +545,9 @@ def fp4_index_logits_req_to_token(
     # Unsupported heads, block layouts, and partial groups retain the old grid.
     use_grouped = (
         query_group_size == 6
-        # Only the measured 20-request / 32-request verify shapes opt in.
-        # Other graph buckets (including 96 requests) keep the original grid.
-        and B in (120, 192)
+        # Validated even request buckets from 20 through 40 share six queries.
+        # Other graph buckets (including partial groups) keep the original grid.
+        and B in (120, 132, 144, 156, 168, 180, 192, 204, 216, 228, 240)
         and H == 32
         and candidate_block_size in (0, 8)
         and envs.SGLANG_OPT_DSV41_INDEXER_SKIP_INVALID_TILES.get()
