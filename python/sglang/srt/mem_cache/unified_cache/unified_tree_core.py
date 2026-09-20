@@ -371,6 +371,9 @@ class _InsertWalkState(msgspec.Struct):
 
     phase: _InsertPhase
     node: UnifiedTreeNode
+    # Keep the full key throughout WALK. total_prefix_length is its cursor;
+    # copying the remaining suffix at each cached node is quadratic for a
+    # long request inserted in many prefill chunks.
     key: RadixKey
     value: torch.Tensor
     params: InsertParams
@@ -1023,14 +1026,17 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
     def _insert_walk_step(self, state: _InsertWalkState) -> None:
         """Process one walked node, appending its barrier actions to the state."""
         key = state.key
-        child_key = key.child_key(self.page_size) if len(key) else None
+        offset = state.total_prefix_length
+        child_key = (
+            key.child_key_at(offset, self.page_size) if offset < len(key) else None
+        )
         if child_key not in state.node.children:
             state.phase = _InsertPhase.COMMIT
             return
         step_actions = state.pending_actions
         node = state.node.children[child_key]
         self._touch_node(node)
-        prefix_len = node.key.match(key, page_size=self.page_size)
+        prefix_len = node.key.match_at(key, offset, page_size=self.page_size)
         if prefix_len < len(node.key):
             node, action = self._split_node(node.key, node, prefix_len)
             if action is not None:
@@ -1092,7 +1098,6 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
             step_actions.append(self._build_backup_kv_action(node))
         state.node = node
         state.total_prefix_length += prefix_len
-        state.key = key[prefix_len:]
         state.value = state.value[prefix_len:]
 
     def _insert_commit_step(self, state: _InsertWalkState) -> None:
@@ -1101,14 +1106,22 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         # value alone; auxiliary components (SWA, Mamba) may legitimately hold
         # only a tombstone for this span (e.g. the whole leaf is outside the SWA
         # window). Materialize it anyway so the Full KV stays cacheable.
-        if len(state.key):
+        if state.total_prefix_length < len(state.key):
             state.result.record_adopted_range(
                 BASE_COMPONENT_TYPE,
                 state.total_prefix_length,
-                state.total_prefix_length + len(state.key),
+                len(state.key),
+            )
+            # Only a newly stored leaf needs suffix storage. Keep the ordinary
+            # RadixKey slice here so it does not retain the request's full key
+            # and bigram leaves preserve their shared boundary token.
+            tail_key = (
+                state.key[state.total_prefix_length :]
+                if state.total_prefix_length
+                else state.key
             )
             state.target_node = self._add_new_node(
-                state.node, state.key, state.value, priority=state.priority
+                state.node, tail_key, state.value, priority=state.priority
             )
             state.is_new_leaf = True
         else:
