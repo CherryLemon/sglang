@@ -58,3 +58,50 @@ rewrites must account for the compiled accumulation order.
 Integrated multi-rank serving and long-context regression results are
 reported separately once available. The component checks alone do not
 guarantee autoregressive output or coding-task correctness.
+
+## Reusing keys across static DSpark verification queries
+
+A later patch shares decoded keys across the six consecutive verification
+queries belonging to one request. The backend enables this hint only for
+DSpark STATIC target verification, with matching configured and actual
+draft counts, the expected token/request dimensions, and no hoisted prefill
+metadata. That path constructs request IDs with `repeat_interleave(..., 6)`.
+The kernel wrapper further restricts execution to the measured physical
+row counts 120 and 192, 32 heads, candidate blocks 0/8, and the existing
+`SGLANG_OPT_DSV41_INDEXER_SKIP_INVALID_TILES=1` setting. Other callers and
+graph buckets use the original launch. Compact candidate scoring is unchanged.
+
+Every replay checks request equality on the device. A shared key tile is
+decoded up to the largest visible length; each query keeps its own Q, head
+weights, visibility, dot and reduction order, BF16 rounding, and source
+outputs. No host read of device data or new synchronization is introduced.
+
+The following unprofiled full-wrapper measurements use the exact decoder
+above as the baseline. Each entry is the median of five rounds of 20 calls
+after ten warmup calls on the same H100 environment.
+
+| Physical rows / mode | Exact decoder, ms | Shared decoding, ms |
+|---|---:|---:|
+|120 / dense|1.556493|0.927299|
+|120 / source|3.173112|1.901811|
+|192 / dense|2.492808|1.485048|
+|192 / source|5.079219|3.049898|
+
+The measured calls improve by about 40%. Register use increases to 192/193
+per thread; shared memory remains 8 KiB, with no spills. This gain comes
+from avoiding repeated decoding despite lower potential occupancy.
+
+Twenty-four production-wrapper cases and 96 graph replays with changing
+inputs pass bitwise score and candidate-length comparison and TopK checks.
+Coverage includes empty/partial visibility, changed page mappings and cache
+payloads, mixed request IDs, dense/source/both output modes, and fallback
+rows 1/6/7/12/24/576. A separate enabled 120-row, 614400-token case passes
+dense/source checks and eight graph replays. Fallback timings differ by at
+most 0.21% in the sampled cases. An AST check exercises the actual backend
+hint guard, while complete model integration remains a separate check.
+
+A deliberately incorrect hint with interleaved requests takes a defensive
+per-query decode branch. Its output remains exact, but it is 15–18% slower
+than the original kernel in the tested large shapes. The production gate
+uses the proven static request grouping; this fallback is not a general
+performance recommendation for arbitrary query layouts.
