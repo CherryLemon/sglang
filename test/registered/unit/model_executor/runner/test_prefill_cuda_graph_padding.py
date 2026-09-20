@@ -19,6 +19,7 @@ register_cpu_ci(est_time=1, suite="base-a-test-cpu")
 class TestPrefillCudaGraphPadding(CustomTestCase):
     def _make_runner(self):
         runner = PrefillCudaGraphRunner.__new__(PrefillCudaGraphRunner)
+        runner.model_runner = SimpleNamespace(attn_backend=SimpleNamespace())
         runner._is_full_backend = False
         runner.enable_lora = False
         runner._capture_chunked_prefix = False

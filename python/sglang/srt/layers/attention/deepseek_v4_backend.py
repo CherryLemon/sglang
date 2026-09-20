@@ -1485,7 +1485,9 @@ class DeepseekV4AttnBackend(
         num_pages = core.page_table.shape[1]
         max_seq_len = _prefill_graph_max_seq_len()
         if max_seq_len is not None:
-            num_pages = min(max_seq_len // self.page_size, num_pages)
+            num_pages = min(
+                (max_seq_len + self.page_size - 1) // self.page_size, num_pages
+            )
         index_page_size = self.token_to_kv_pool.get_index_k_page_size(compress_ratio)
         page_table = _expand_index_page_table(
             core.page_table[:, :num_pages],
@@ -1517,10 +1519,26 @@ class DeepseekV4AttnBackend(
 
     def can_run_prefill_cuda_graph(self, forward_batch: ForwardBatch) -> bool:
         max_seq_len = _prefill_graph_max_seq_len()
-        seq_lens_cpu = forward_batch.seq_lens_cpu
-        if max_seq_len is None or seq_lens_cpu is None or seq_lens_cpu.numel() == 0:
+        if max_seq_len is None:
             return True
-        return int(seq_lens_cpu.max().item()) <= max_seq_len
+        # A bounded capture must not admit an unknown context or synchronize a
+        # device tensor to discover it. Ordinary prefill has CPU lengths; keep
+        # any path without that evidence eager.
+        seq_lens_cpu = _as_int_list(forward_batch.seq_lens_cpu)
+        return bool(seq_lens_cpu) and max(seq_lens_cpu) <= max_seq_len
+
+    def _prefill_cuda_graph_metadata_max_seq_len(self) -> int:
+        """Use one fixed metadata width for bounded capture and every replay.
+
+        MAX_SEQ_LEN_FOR_CAPTURE also sizes decode graphs and the model's full
+        context capacity. Do not shrink it when only prefill replay is bounded.
+        """
+        max_seq_len = _prefill_graph_max_seq_len()
+        if max_seq_len is None:
+            return self.MAX_SEQ_LEN_FOR_CAPTURE
+        if max_seq_len <= 0:
+            raise ValueError("prefill CUDA graph max_seq_len must be positive")
+        return min(max_seq_len, self.MAX_SEQ_LEN_FOR_CAPTURE)
 
     def _build_late_layer_tail_metadata(
         self, forward_batch: ForwardBatch
@@ -2602,9 +2620,11 @@ class DeepseekV4AttnBackend(
     def init_forward_metadata_for_breakable_cuda_graph_capture(
         self, forward_batch: ForwardBatch
     ):
+        if not self.can_run_prefill_cuda_graph(forward_batch):
+            raise ValueError("prefill CUDA graph capture exceeds its context bound")
         self.forward_metadata = self._build_forward_metadata(
             forward_batch,
-            max_seq_len_override=self.MAX_SEQ_LEN_FOR_CAPTURE,
+            max_seq_len_override=self._prefill_cuda_graph_metadata_max_seq_len(),
             use_prefill_cuda_graph=True,
         )
         if self.low_ratio_prefill_graph and forward_batch.forward_mode.is_extend():
@@ -2651,12 +2671,14 @@ class DeepseekV4AttnBackend(
         *,
         static_forward_batch: Optional[ForwardBatch] = None,
     ) -> None:
+        if not self.can_run_prefill_cuda_graph(forward_batch):
+            raise ValueError("prefill CUDA graph replay exceeds its context bound")
         # Build graph-compatible metadata against the padded static batch. The
         # batch still carries live seq/extend lens, so the online c128 prefill
         # plan remains batch-specific without constructing a second metadata set.
         static_metadata = self._build_forward_metadata(
             static_forward_batch if static_forward_batch is not None else forward_batch,
-            max_seq_len_override=self.MAX_SEQ_LEN_FOR_CAPTURE,
+            max_seq_len_override=self._prefill_cuda_graph_metadata_max_seq_len(),
             use_prefill_cuda_graph=True,
         )
         assert isinstance(capture_metadata, DSV4Metadata)

@@ -424,6 +424,7 @@ class TestPrefillCudaGraphRunnerChunkedPrefix(CustomTestCase):
 
     def test_prefix_gate_only_applies_to_chunked_prefix_variant(self):
         runner = PrefillCudaGraphRunner.__new__(PrefillCudaGraphRunner)
+        runner.model_runner = SimpleNamespace(attn_backend=SimpleNamespace())
         runner._capture_req_slots = 4
         runner.enable_lora = False
         runner.capture_hidden_mode = CaptureHiddenMode.NULL
