@@ -3557,6 +3557,24 @@ class DeepseekV4AttnBackend(
         q = indexer.queries(q_lora, layer.freqs_cis[pos])
         weights = indexer.head_weights(x)
         logical_forward_mode = _get_logical_forward_mode(forward_batch)
+        # Match the static DSpark verify layout, whose request IDs come from
+        # token_req_indices(...): repeat_interleave(req_pool_indices, 6).
+        # Hoisted prefill metadata and compact/ragged verify are not covered.
+        # The score kernel still checks device request IDs on every replay.
+        query_group_size = 1
+        if (
+            forward_batch.forward_mode.is_target_verify()
+            and logical_forward_mode.is_target_verify()
+            and self.model_runner.spec_algorithm.is_dspark()
+            and not self.is_dspark_draft
+            and read_ragged_verify_mode() is RaggedVerifyMode.STATIC
+            and self.speculative_num_draft_tokens == 6
+            and int(getattr(forward_batch.spec_info, "draft_token_num", 0)) == 6
+            and bs == forward_batch.batch_size * 6
+            and bs == forward_batch.req_pool_indices.numel() * 6
+            and getattr(self.forward_metadata, "low_ratio_req_indices", None) is None
+        ):
+            query_group_size = 6
         compact = (
             (
                 logical_forward_mode.is_decode()
@@ -3585,6 +3603,7 @@ class DeepseekV4AttnBackend(
                     lmax,
                     candidate_block_size=indexer.candidate_block_size,
                     write_logits=False,
+                    query_group_size=query_group_size,
                 )
                 from sglang.kernels.ops.attention.dsv4.candidate_blocks import (
                     candidate_block_state,
@@ -3627,6 +3646,7 @@ class DeepseekV4AttnBackend(
                 table.shape[1] // 68,
                 ratio,
                 lmax,
+                query_group_size=query_group_size,
             )
         if indexer.is_candidate_source and not compact:
             self.candidate_masks = select_candidate_blocks(

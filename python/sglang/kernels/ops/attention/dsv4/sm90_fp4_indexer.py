@@ -192,6 +192,242 @@ def _fp4_index_logits_kernel(
         )
 
 
+# Each CTA shares a request's decoded K tile across six verify queries. Keep
+# each query's original 32-head MMA and reduction layout: increasing the MMA M
+# dimension can change floating-point reduction order. Request equality is
+# checked on device on every replay; visible lengths and source writes remain
+# per query. Compact candidate lists deliberately use the original kernel.
+@triton.jit
+def _fp4_group_load_keys(
+    RT,
+    TABLE,
+    req,
+    nvis,
+    L,
+    STRIDE_REQ,
+    ROW_STRIDE,
+    PAGE,
+    RATIO: tl.constexpr,
+    BL: tl.constexpr,
+):
+    l = tl.program_id(1) * BL + tl.arange(0, BL)
+    i = tl.arange(0, 64)
+    valid = l < tl.minimum(nvis, L)
+    slot = (
+        tl.load(
+            RT + req.to(tl.int64) * STRIDE_REQ + l.to(tl.int64) * RATIO, valid, other=0
+        ).to(tl.int64)
+        // RATIO
+    )
+    page = slot // PAGE
+    off = slot % PAGE
+    row = page * ROW_STRIDE
+    pay = tl.load(
+        TABLE + row[:, None] + off[:, None] * 64 + i[None, :], valid[:, None], other=0
+    )
+    low = _e2m1_decode(pay & 15)
+    high = _e2m1_decode(pay >> 4 & 15)
+    exps = tl.load(
+        TABLE + row[:, None] + PAGE * 64 + off[:, None] * 4 + (i // 16)[None, :],
+        valid[:, None],
+        other=127,
+    )
+    scale = tl.exp2(exps.to(tl.float32) - 127.0)
+    return ((low * scale).to(tl.bfloat16), (high * scale).to(tl.bfloat16))
+
+
+@triton.jit
+def _fp4_group_invalid(
+    OUT,
+    CS,
+    CL,
+    b,
+    L,
+    SO,
+    SCS,
+    BL: tl.constexpr,
+    CB: tl.constexpr,
+    WRITE_LOGITS: tl.constexpr,
+    WRITE_CANDIDATES: tl.constexpr,
+):
+    lb = tl.program_id(1)
+    l = lb * BL + tl.arange(0, BL)
+    if WRITE_LOGITS:
+        tl.store(OUT + b * SO + l, -float("inf"), l < L)
+    if WRITE_CANDIDATES:
+        ids = lb * (BL // CB) + tl.arange(0, BL // CB)
+        tl.store(CS + b * SCS + ids, -float("inf"), ids < tl.cdiv(L, CB))
+        tl.store(CL + b, 0, lb == 0)
+
+
+@triton.jit
+def _fp4_group_score(
+    Q,
+    W,
+    OUT,
+    CS,
+    CL,
+    KL,
+    KH,
+    b,
+    nvis,
+    L,
+    SQB,
+    SQH,
+    SWB,
+    SO,
+    SCS,
+    BL: tl.constexpr,
+    CB: tl.constexpr,
+    WRITE_LOGITS: tl.constexpr,
+    WRITE_CANDIDATES: tl.constexpr,
+):
+    h = tl.arange(0, 32)
+    i = tl.arange(0, 64)
+    lb = tl.program_id(1)
+    l = lb * BL + tl.arange(0, BL)
+    qe = tl.load(Q + b * SQB + h[:, None] * SQH + 2 * i[None, :])
+    qo = tl.load(Q + b * SQB + h[:, None] * SQH + 2 * i[None, :] + 1)
+    acc = tl.dot(qe, tl.trans(KL))
+    acc += tl.dot(qo, tl.trans(KH))
+    s = tl.maximum(acc.to(tl.bfloat16).to(tl.float32), 0.0)
+    w = tl.load(W + b * SWB + h).to(tl.float32)
+    s = (s * w[:, None]).to(tl.bfloat16).to(tl.float32)
+    logit = tl.sum(s, 0).to(tl.bfloat16).to(tl.float32)
+    logit = tl.where(l < tl.minimum(nvis, L), logit, -float("inf"))
+    if WRITE_LOGITS:
+        tl.store(OUT + b * SO + l, logit, l < L)
+    if WRITE_CANDIDATES:
+        scores = tl.max(tl.reshape(logit, (BL // CB, CB)), 1)
+        ids = lb * (BL // CB) + tl.arange(0, BL // CB)
+        scores = tl.where((nvis > 0) & (ids == (nvis - 1) // CB), float("inf"), scores)
+        tl.store(CS + b * SCS + ids, scores, ids < tl.cdiv(L, CB))
+        tl.store(CL + b, tl.cdiv(nvis, CB), lb == 0)
+
+
+@triton.jit
+def _fp4_index_logits_grouped_kernel(
+    Q,
+    W,
+    RT,
+    REQ,
+    LENS,
+    TABLE,
+    OUT,
+    CS,
+    CL,
+    B,
+    L,
+    PAGE,
+    ROW_STRIDE,
+    SQB,
+    SQH,
+    SWB,
+    SR,
+    SO,
+    SCS,
+    GROUP: tl.constexpr,
+    PGROUP: tl.constexpr,
+    RATIO: tl.constexpr,
+    BL: tl.constexpr = 64,
+    CB: tl.constexpr = 8,
+    WRITE_LOGITS: tl.constexpr = True,
+    WRITE_CANDIDATES: tl.constexpr = False,
+):
+    first = tl.program_id(0) * GROUP
+    lb = tl.program_id(1)
+    offset = tl.arange(0, PGROUP)
+    rows = first + offset
+    mask = (offset < GROUP) & (rows < B)
+    lens = tl.load(LENS + rows, mask, other=0)
+    maxlens = tl.max(lens, 0)
+    if lb * BL >= tl.minimum(maxlens, L):
+        for j in tl.range(0, GROUP, loop_unroll_factor=1):
+            b = first + j
+            if b < B:
+                _fp4_group_invalid(
+                    OUT, CS, CL, b, L, SO, SCS, BL, CB, WRITE_LOGITS, WRITE_CANDIDATES
+                )
+        return
+    req0 = tl.load(REQ + first)
+    reqs = tl.load(REQ + rows, mask, other=req0)
+    same = tl.sum((reqs != req0).to(tl.int32), 0) == 0
+    if same:
+        kl, kh = _fp4_group_load_keys(
+            RT, TABLE, req0, maxlens, L, SR, ROW_STRIDE, PAGE, RATIO, BL
+        )
+        for j in tl.range(0, GROUP, loop_unroll_factor=1):
+            b = first + j
+            if b < B:
+                nvis = tl.load(LENS + b)
+                _fp4_group_score(
+                    Q,
+                    W,
+                    OUT,
+                    CS,
+                    CL,
+                    kl,
+                    kh,
+                    b,
+                    nvis,
+                    L,
+                    SQB,
+                    SQH,
+                    SWB,
+                    SO,
+                    SCS,
+                    BL,
+                    CB,
+                    WRITE_LOGITS,
+                    WRITE_CANDIDATES,
+                )
+    else:
+        for j in tl.range(0, GROUP, loop_unroll_factor=1):
+            b = first + j
+            if b < B:
+                nvis = tl.load(LENS + b)
+                if lb * BL < tl.minimum(nvis, L):
+                    req = tl.load(REQ + b)
+                    kl, kh = _fp4_group_load_keys(
+                        RT, TABLE, req, nvis, L, SR, ROW_STRIDE, PAGE, RATIO, BL
+                    )
+                    _fp4_group_score(
+                        Q,
+                        W,
+                        OUT,
+                        CS,
+                        CL,
+                        kl,
+                        kh,
+                        b,
+                        nvis,
+                        L,
+                        SQB,
+                        SQH,
+                        SWB,
+                        SO,
+                        SCS,
+                        BL,
+                        CB,
+                        WRITE_LOGITS,
+                        WRITE_CANDIDATES,
+                    )
+                else:
+                    _fp4_group_invalid(
+                        OUT,
+                        CS,
+                        CL,
+                        b,
+                        L,
+                        SO,
+                        SCS,
+                        BL,
+                        CB,
+                        WRITE_LOGITS,
+                        WRITE_CANDIDATES,
+                    )
+
+
 def fp4_index_logits_decode(
     q: torch.Tensor,
     weights: torch.Tensor,
@@ -267,6 +503,7 @@ def fp4_index_logits_req_to_token(
     width: int,
     candidate_block_size: int = 0,
     write_logits: bool = True,
+    query_group_size: int = 1,
 ) -> (
     torch.Tensor
     | tuple[torch.Tensor, torch.Tensor, torch.Tensor]
@@ -304,41 +541,83 @@ def fp4_index_logits_req_to_token(
         if candidate_block_size:
             return out, candidate_scores, candidate_lens
         return out
-    grid = (B, triton.cdiv(width, block_l))
-    _fp4_index_logits_kernel[grid](
-        q,
-        weights,
-        req_to_token,
-        req_to_token,
-        req,
-        req_to_token,
-        lens,
-        table,
-        out,
-        candidate_scores,
-        candidate_lens,
-        width,
-        page_size,
-        table.stride(0),
-        q.stride(0),
-        q.stride(1),
-        weights.stride(0),
-        req_to_token.stride(0),
-        req_to_token.stride(0),
-        out.stride(0),
-        candidate_scores.stride(0),
-        H=H,
-        HALF_D=INDEX_HEAD_DIM // 2,
-        BLOCK_L=block_l,
-        SKIP_INVALID=envs.SGLANG_OPT_DSV41_INDEXER_SKIP_INVALID_TILES.get(),
-        RATIO=ratio,
-        USE_REQ_TO_TOKEN=True,
-        USE_CANDIDATE_BLOCKS=False,
-        CANDIDATE_BLOCK_SIZE=candidate_block_size or 1,
-        WRITE_CANDIDATES=bool(candidate_block_size),
-        WRITE_LOGITS=write_logits,
-        num_warps=4,
+    # The caller supplies a semantic target-verify hint, never a guess from B.
+    # Unsupported heads, block layouts, and partial groups retain the old grid.
+    use_grouped = (
+        query_group_size == 6
+        # Only the measured 20-request / 32-request verify shapes opt in.
+        # Other graph buckets (including 96 requests) keep the original grid.
+        and B in (120, 192)
+        and H == 32
+        and candidate_block_size in (0, 8)
+        and envs.SGLANG_OPT_DSV41_INDEXER_SKIP_INVALID_TILES.get()
     )
+    if use_grouped:
+        _fp4_index_logits_grouped_kernel[(B // 6, triton.cdiv(width, block_l))](
+            q,
+            weights,
+            req_to_token,
+            req,
+            lens,
+            table,
+            out,
+            candidate_scores,
+            candidate_lens,
+            B,
+            width,
+            page_size,
+            table.stride(0),
+            q.stride(0),
+            q.stride(1),
+            weights.stride(0),
+            req_to_token.stride(0),
+            out.stride(0),
+            candidate_scores.stride(0),
+            GROUP=6,
+            PGROUP=8,
+            RATIO=ratio,
+            BL=block_l,
+            CB=candidate_block_size or 1,
+            WRITE_LOGITS=write_logits,
+            WRITE_CANDIDATES=bool(candidate_block_size),
+            num_warps=4,
+        )
+    else:
+        grid = (B, triton.cdiv(width, block_l))
+        _fp4_index_logits_kernel[grid](
+            q,
+            weights,
+            req_to_token,
+            req_to_token,
+            req,
+            req_to_token,
+            lens,
+            table,
+            out,
+            candidate_scores,
+            candidate_lens,
+            width,
+            page_size,
+            table.stride(0),
+            q.stride(0),
+            q.stride(1),
+            weights.stride(0),
+            req_to_token.stride(0),
+            req_to_token.stride(0),
+            out.stride(0),
+            candidate_scores.stride(0),
+            H=H,
+            HALF_D=INDEX_HEAD_DIM // 2,
+            BLOCK_L=block_l,
+            SKIP_INVALID=envs.SGLANG_OPT_DSV41_INDEXER_SKIP_INVALID_TILES.get(),
+            RATIO=ratio,
+            USE_REQ_TO_TOKEN=True,
+            USE_CANDIDATE_BLOCKS=False,
+            CANDIDATE_BLOCK_SIZE=candidate_block_size or 1,
+            WRITE_CANDIDATES=bool(candidate_block_size),
+            WRITE_LOGITS=write_logits,
+            num_warps=4,
+        )
     if not write_logits:
         assert candidate_block_size
         return candidate_scores, candidate_lens
