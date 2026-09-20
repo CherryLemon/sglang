@@ -1,4 +1,8 @@
-# H100 FP8 configurations for concurrent V4.1 decoding
+# H100 FP8 projections for concurrent V4.1 decoding
+
+This note records the configuration expansion and a later fixed-shape
+code-generation specialization. All measurements below are component results;
+combined serving validation is separate.
 
 Four existing block32 FP8 projection configurations now cover the larger
 physical batches produced by TP2 / DP4 with DSPARK. Small-batch dispatch and
@@ -83,3 +87,42 @@ memory usage of the complete model or its collection of CUDA graphs.
 Complete serving validation and capacity measurements are separate from these
 component results. In particular, graph/kernel checks do not guarantee identical
 autoregressive text across batch shapes or correctness on arbitrary coding tasks.
+
+## Fixed-shape integer arithmetic
+
+The later specialization in `fp8_hopper_static.py` makes M/N/K and quantization
+group sizes compile-time constants for 16 exact concurrent-decode shapes.
+It preserves the current tile and SplitK configuration, each K32 E4M3 dot,
+scale multiplication order, FP32 accumulation, activation quantizer, and
+SplitK reduction. The dispatch also checks the complete expected configuration;
+an altered configuration falls back to the original implementation.
+
+| N,K | Physical M | SplitK |
+|---|---|---:|
+| 1792,5120 | 100,120,160,192 | 4 |
+| 16384,1280 | 100,120,160,192 | 1 |
+| 5120,4096 | 100,120,160,192 | 2 |
+| 576,5120 | 400,480,640,768 | 4 |
+
+The whole production call, including UE8M0 activation quantization and any
+SplitK reduction, improves by 1.043–1.091× over runtime `18356102` in these
+16 shapes. For example, M120/N16384/K1280 changes from 35.614 to 32.642 µs,
+and M192/N5120/K4096 from 82.302 to 78.342 µs. Two additional candidates
+with ordered loop unrolling were screened and rejected on performance.
+
+Each shape passes 20 changed-input seeds for both BF16 and FP32 outputs with
+storage-bitwise equality to the original kernel, in addition to the numerical
+criteria above. Validation includes 672 graph replays with changed inputs,
+scales and padding, and 65 neighboring or fallback shapes. These checks cover
+the actual dispatch wrapper. The new kernel adds no global workspace.
+
+Generated PTX retains E4M3 WGMMA. Static div/rem instructions drop from 27 to
+two; 26 of the original instructions were in CTA setup and only one was in the
+K loop. This is not a claim of 25 fewer instructions per K iteration. Both
+versions allocate 128 registers per thread in hardware, use 12 KiB dynamic
+shared memory, and have no spills in the sampled shapes.
+
+Adding the isolated call-time differences across the covered target and draft
+layers estimates 0.399 ms saved per cycle at 80 concurrent requests, and
+0.558 ms at 128. Cache behavior, overlap and other operators can change the
+integrated gain. These estimates do not establish a 100 tokens/s serving SLA.
