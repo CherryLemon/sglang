@@ -29,7 +29,7 @@ from sglang.srt.speculative.spec_info import (
 )
 from sglang.srt.speculative.spec_tp_sync import SpecTpSync, SpecTpSyncSite
 from sglang.srt.speculative.spec_utils import draft_tp_context
-from sglang.srt.utils.common import is_pin_memory_available
+from sglang.srt.utils.common import is_cuda, is_pin_memory_available
 from sglang.srt.utils.invariants import Bucket, Invariant, NotNaN, expect
 
 logger = logging.getLogger(__name__)
@@ -357,7 +357,7 @@ class DraftBlockProposer:
             spec_info=self._draft_block_spec_info,
             capture_hidden_mode=CaptureHiddenMode.NULL,
         )
-        self._fill_dp_moe_sync_metadata(idle_batch, batch)
+        self._prepare_forward_metadata(idle_batch, batch)
         with torch.inference_mode():
             self.draft_model_runner.forward(idle_batch)
 
@@ -411,7 +411,6 @@ class DraftBlockProposer:
         else:
             raise RuntimeError("DSpark decode expected batch.seq_lens_cpu, got None")
 
-        draft_num_tokens = bs * query_token_num
         draft_forward_batch = ForwardBatch(
             forward_mode=ForwardMode.TARGET_VERIFY,
             batch_size=bs,
@@ -426,16 +425,9 @@ class DraftBlockProposer:
             spec_algorithm=SpeculativeAlgorithm.DSPARK,
             spec_info=self._draft_block_spec_info,
             capture_hidden_mode=CaptureHiddenMode.NULL,
-            num_token_non_padded=_make_num_token_non_padded(draft_num_tokens, device),
-            num_token_non_padded_cpu=draft_num_tokens,
         )
-        self._fill_dp_moe_sync_metadata(draft_forward_batch, batch)
-        graph_runner = self.draft_model_runner.decode_cuda_graph_runner
-        if (
-            draft_sampler is not None
-            and graph_runner is not None
-            and graph_runner.can_run_graph(draft_forward_batch)
-        ):
+        can_run_graph = self._prepare_forward_metadata(draft_forward_batch, batch)
+        if draft_sampler is not None and can_run_graph:
             draft_sampler.stage_sampling_params(bs=bs, sampling_info=sampling_info)
         with torch.inference_mode():
             draft_out = self.draft_model_runner.forward(draft_forward_batch)
@@ -465,36 +457,48 @@ class DraftBlockProposer:
             can_run_graph=draft_out.can_run_graph,
         )
 
-    def _fill_dp_moe_sync_metadata(
+    def _prepare_forward_metadata(
         self, forward_batch: ForwardBatch, batch: ScheduleBatch
-    ) -> None:
-        # The dense DSpark draft still reuses the target batch's graph tier.
-        # Set graph eligibility before the DP-MoE-only metadata early return.
-        forward_batch.can_run_decode_cuda_graph = batch.can_run_decode_cuda_graph
-        if not self._dp_moe_sync or batch.global_num_tokens is None:
-            return
-        # Graph bucket selection uses the raw per-rank request counts.  Keep
-        # them separate from global_num_tokens_cpu below, which is scaled into
-        # draft-token units for DP/MoE synchronization.
-        forward_batch.original_global_num_tokens_cpu = batch.global_num_tokens
-        gnt, gnt_logprob = spec_scale_global_num_tokens(
-            self._draft_block_spec_info,
-            batch.global_num_tokens,
-            batch.global_num_tokens_for_logprob,
-        )
+    ) -> bool:
         device = self.draft_model_runner.device
-        forward_batch.original_global_num_tokens_cpu = batch.global_num_tokens
         num_tokens = forward_batch.input_ids.numel()
-        num_token_non_padded = _make_num_token_non_padded(num_tokens, device)
-        if num_token_non_padded is not None:
-            forward_batch.num_token_non_padded = num_token_non_padded
+        forward_batch.num_token_non_padded = _make_num_token_non_padded(
+            num_tokens, device
+        )
         forward_batch.num_token_non_padded_cpu = num_tokens
-        forward_batch.global_num_tokens_cpu = gnt
-        forward_batch.global_num_tokens_for_logprob_cpu = gnt_logprob
-        pin_memory = is_pin_memory_available(device)
-        forward_batch.global_num_tokens_gpu = torch.tensor(
-            gnt, dtype=torch.int64, pin_memory=pin_memory
-        ).to(device, non_blocking=True)
-        forward_batch.global_num_tokens_for_logprob_gpu = torch.tensor(
-            gnt_logprob, dtype=torch.int64, pin_memory=pin_memory
-        ).to(device, non_blocking=True)
+        # The dense DSpark draft still reuses the target batch's graph tier.
+        forward_batch.can_run_decode_cuda_graph = batch.can_run_decode_cuda_graph
+        needs_dp_metadata = self._dp_moe_sync and batch.global_num_tokens is not None
+        if needs_dp_metadata:
+            # Graph admission uses request counts; DP/MoE synchronization uses
+            # this draft's token widths. Keep both host representations.
+            forward_batch.original_global_num_tokens_cpu = batch.global_num_tokens
+            gnt, gnt_logprob = spec_scale_global_num_tokens(
+                self._draft_block_spec_info,
+                batch.global_num_tokens,
+                batch.global_num_tokens_for_logprob,
+            )
+            forward_batch.global_num_tokens_cpu = gnt
+            forward_batch.global_num_tokens_for_logprob_cpu = gnt_logprob
+
+        graph_runner = self.draft_model_runner.decode_cuda_graph_runner
+        can_run_graph = bool(
+            graph_runner is not None and graph_runner.can_run_graph(forward_batch)
+        )
+        # DecodeCudaGraphRunner's registry fills both global count buffers from
+        # the padded graph width (copy_from_fb=False). Uploading the live DP
+        # counts here is wasted on replay. Keep them for eager fallback and
+        # other device backends, whose input contracts differ.
+        if needs_dp_metadata and not (is_cuda() and can_run_graph):
+            pin_memory = is_pin_memory_available(device)
+            forward_batch.global_num_tokens_gpu = torch.tensor(
+                forward_batch.global_num_tokens_cpu,
+                dtype=torch.int64,
+                pin_memory=pin_memory,
+            ).to(device, non_blocking=True)
+            forward_batch.global_num_tokens_for_logprob_gpu = torch.tensor(
+                forward_batch.global_num_tokens_for_logprob_cpu,
+                dtype=torch.int64,
+                pin_memory=pin_memory,
+            ).to(device, non_blocking=True)
+        return can_run_graph

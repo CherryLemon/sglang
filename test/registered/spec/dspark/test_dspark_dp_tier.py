@@ -54,37 +54,118 @@ class TestDpGlobalVerifyTierNumTokens(CustomTestCase):
 
 
 class TestDraftDpSyncMetadata(CustomTestCase):
-    def test_preserves_unscaled_request_counts_for_cuda_graph_admission(self):
+    def _proposer(self, graph_runner=None, *, dp_moe_sync=True):
         proposer = DraftBlockProposer.__new__(DraftBlockProposer)
-        proposer._dp_moe_sync = True
+        proposer._dp_moe_sync = dp_moe_sync
         proposer._draft_block_spec_info = SimpleNamespace(
             num_tokens_per_req=6,
             num_tokens_for_logprob_per_req=1,
         )
-        proposer.draft_model_runner = SimpleNamespace(device="cpu")
-
-        forward_batch = SimpleNamespace(input_ids=torch.arange(6))
-        batch = SimpleNamespace(
-            global_num_tokens=[1, 3, 0, 2],
-            global_num_tokens_for_logprob=[1, 3, 0, 2],
-            can_run_decode_cuda_graph=True,
+        proposer.draft_model_runner = SimpleNamespace(
+            device="cpu", decode_cuda_graph_runner=graph_runner
         )
+        return proposer
 
-        with patch(
-            "sglang.srt.speculative.dspark_components.dspark_draft.enable_num_token_non_padded",
-            return_value=True,
+    def _prepare(self, proposer, counts, *, local_bs=1, cuda=True, admitted=True):
+        forward_batch = SimpleNamespace(
+            input_ids=torch.arange(local_bs * 6),
+            global_num_tokens_gpu=None,
+            global_num_tokens_for_logprob_gpu=None,
+        )
+        # A logprob width independent of the draft width must survive eager
+        # fallback, even when graph replay synthesized padded token counts.
+        batch = SimpleNamespace(
+            global_num_tokens=counts,
+            global_num_tokens_for_logprob=[int(x > 0) for x in counts],
+            can_run_decode_cuda_graph=admitted,
+        )
+        module = "sglang.srt.speculative.dspark_components.dspark_draft"
+        with (
+            patch(f"{module}.enable_num_token_non_padded", return_value=True),
+            patch(f"{module}.is_cuda", return_value=cuda),
         ):
-            proposer._fill_dp_moe_sync_metadata(forward_batch, batch)
+            can_run_graph = proposer._prepare_forward_metadata(forward_batch, batch)
+        return forward_batch, can_run_graph
 
+    def test_eager_metadata_preserves_counts_and_logprob_width(self):
+        forward_batch, can_run_graph = self._prepare(self._proposer(), [1, 3, 0, 2])
+        self.assertFalse(can_run_graph)
         self.assertEqual(
             forward_batch.original_global_num_tokens_cpu,
             [1, 3, 0, 2],
         )
         self.assertEqual(forward_batch.global_num_tokens_cpu, [6, 18, 0, 12])
+        self.assertEqual(forward_batch.global_num_tokens_gpu.tolist(), [6, 18, 0, 12])
+        self.assertEqual(
+            forward_batch.global_num_tokens_for_logprob_gpu.tolist(), [1, 1, 0, 1]
+        )
         self.assertEqual(forward_batch.num_token_non_padded.item(), 6)
         self.assertEqual(forward_batch.num_token_non_padded.dtype, torch.int32)
         self.assertEqual(forward_batch.num_token_non_padded_cpu, 6)
         self.assertTrue(forward_batch.can_run_decode_cuda_graph)
+
+    def test_graph_admission_reads_host_counts_before_skipping_uploads(self):
+        admissions = []
+
+        def admit(forward_batch):
+            admissions.append(forward_batch.original_global_num_tokens_cpu)
+            self.assertEqual(
+                forward_batch.global_num_tokens_cpu,
+                [6 * x for x in forward_batch.original_global_num_tokens_cpu],
+            )
+            return forward_batch.can_run_decode_cuda_graph
+
+        proposer = self._proposer(SimpleNamespace(can_run_graph=admit))
+        # Reuse one proposer across active/idle and graph/eager transitions.
+        for counts, local_bs, admitted in [
+            ([1, 3, 0, 2], 1, True),
+            ([0, 1, 4, 0], 0, True),
+            ([2, 0, 1, 3], 2, False),
+            ([1, 0, 0, 0], 1, True),
+        ]:
+            with self.subTest(counts=counts, admitted=admitted):
+                forward_batch, can_run_graph = self._prepare(
+                    proposer, counts, local_bs=local_bs, admitted=admitted
+                )
+                self.assertEqual(can_run_graph, admitted)
+                self.assertEqual(
+                    forward_batch.num_token_non_padded.item(), local_bs * 6
+                )
+                self.assertEqual(forward_batch.num_token_non_padded_cpu, local_bs * 6)
+                if admitted:
+                    self.assertIsNone(forward_batch.global_num_tokens_gpu)
+                    self.assertIsNone(forward_batch.global_num_tokens_for_logprob_gpu)
+                else:
+                    self.assertEqual(
+                        forward_batch.global_num_tokens_gpu.tolist(),
+                        [6 * x for x in counts],
+                    )
+        self.assertEqual(len(admissions), 4)
+
+    def test_other_backends_keep_device_metadata_when_graph_admitted(self):
+        forward_batch, can_run_graph = self._prepare(
+            self._proposer(SimpleNamespace(can_run_graph=lambda _: True)),
+            [0, 2, 1, 3],
+            local_bs=0,
+            cuda=False,
+        )
+        self.assertTrue(can_run_graph)
+        self.assertEqual(forward_batch.global_num_tokens_gpu.tolist(), [0, 12, 6, 18])
+        self.assertEqual(
+            forward_batch.global_num_tokens_for_logprob_gpu.tolist(), [0, 1, 1, 1]
+        )
+
+    def test_dense_draft_keeps_local_token_count_and_graph_eligibility(self):
+        forward_batch, can_run_graph = self._prepare(
+            self._proposer(
+                SimpleNamespace(can_run_graph=lambda fb: fb.can_run_decode_cuda_graph),
+                dp_moe_sync=False,
+            ),
+            [1, 3, 0, 2],
+        )
+        self.assertTrue(can_run_graph)
+        self.assertEqual(forward_batch.num_token_non_padded.item(), 6)
+        self.assertIsNone(forward_batch.global_num_tokens_gpu)
 
 
 class TestBusyIdleGraphKeyIdentity(CustomTestCase):
