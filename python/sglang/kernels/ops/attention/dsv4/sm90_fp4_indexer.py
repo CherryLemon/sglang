@@ -22,13 +22,24 @@ SCALE_BYTES = tl.constexpr(4)
 
 @triton.jit
 def _e2m1_decode(code):
-    # code: uint 0..15 -> e2m1 value. exp = bits 2..1, mantissa = bit 0, sign = bit 3.
-    e = (code >> 1) & 3
-    m = (code & 1).to(tl.float32)
-    sub = m * 0.5
-    nor = (1.0 + m * 0.5) * tl.exp2((e - 1).to(tl.float32))
-    v = tl.where(e == 0, sub, nor)
-    return tl.where((code >> 3) == 1, -v, v)
+    # E2M1 magnitudes are 0, .5, 1, 1.5, 2, 3, 4, 6. Their exact FP32
+    # encodings avoid per-element exponentiation and floating-point decoding.
+    u = code.to(tl.uint32)
+    mag = u & 7
+    bits = tl.where(
+        mag == 0, 0, tl.where(mag == 1, 0x3F000000, 0x3F000000 + (mag << 22))
+    )
+    v = (bits | ((u & 8) << 28)).to(tl.float32, bitcast=True)
+    # Legacy decoding canonicalizes FP4 -0 to +0. An explicit exact add keeps
+    # that behavior without an extra predicate/live range in the score kernel.
+    return tl.inline_asm_elementwise(
+        "add.rn.f32 $0, $1, 0f00000000;",
+        constraints="=f,f",
+        args=[v],
+        dtype=tl.float32,
+        is_pure=True,
+        pack=1,
+    )
 
 
 @triton.jit
