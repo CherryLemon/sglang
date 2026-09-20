@@ -2504,7 +2504,7 @@ class DeepseekV4DecoderLayer(nn.Module):
             if (
                 get_platform().is_sm90
                 and x.is_cuda
-                and 1 <= x.shape[0] <= 64
+                and 1 <= x.shape[0] <= 192
                 and x.shape[1] == 5120
                 and residual.shape == (x.shape[0], 4, 5120)
                 and x.dtype == residual.dtype == torch.bfloat16
@@ -2513,7 +2513,13 @@ class DeepseekV4DecoderLayer(nn.Module):
                 and comb.shape == (x.shape[0], 4, 4)
                 and all(t.is_contiguous() for t in (x, residual, post, comb))
             ):
-                return mhc_post_split_h(x, residual, post, comb)
+                if x.shape[0] <= 64:
+                    return mhc_post_split_h(x, residual, post, comb)
+                from sglang.kernels.ops.layernorm.mhc_post_split_h_tilelang import (
+                    mhc_post_split_h_tilelang,
+                )
+
+                return mhc_post_split_h_tilelang(x, residual, post, comb)
 
             from sglang.kernels.ops.layernorm.mhc import mhc_post
 
