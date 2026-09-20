@@ -110,6 +110,26 @@
     "SPLIT_K": 4
   },
   "1537": {
+    "BLOCK_SIZE_M": 128,
+    "BLOCK_SIZE_N": 64,
+    "BLOCK_SIZE_K": 32,
+    "GROUP_SIZE_M": 1,
+    "num_warps": 4,
+    "num_stages": 3,
+    "SWAP_AB": true,
+    "SPLIT_K": 2
+  },
+  "3072": {
+    "BLOCK_SIZE_M": 128,
+    "BLOCK_SIZE_N": 64,
+    "BLOCK_SIZE_K": 32,
+    "GROUP_SIZE_M": 1,
+    "num_warps": 4,
+    "num_stages": 3,
+    "SWAP_AB": true,
+    "SPLIT_K": 2
+  },
+  "3073": {
     "BLOCK_SIZE_M": 64,
     "BLOCK_SIZE_N": 32,
     "BLOCK_SIZE_K": 32,
