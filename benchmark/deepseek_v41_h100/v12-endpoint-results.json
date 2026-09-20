@@ -1,0 +1,482 @@
+{
+  "runtime_commit": "7a882e727d09ed7b896b44227b80b4e0b0b7481d",
+  "date_utc": "2026-09-20",
+  "workload": {
+    "client_sha256": "3b78b69fc698b34f287ffc1a6ac3bee19825cc2af9f3f354bec967af94bb4026",
+    "native_client_sha256": "7801c745d7663a7fb41952b2294470134110a8058587c07e4f02b3a132c8a68a",
+    "input_ids_sha256": "fd42b1d79556c3758919cf9cd62f589c1e8cc00ea412920076ea3b5277cb9497",
+    "input_tokens": 131072,
+    "max_new_tokens": 8192,
+    "natural_eos": true,
+    "shared_prefix_on_P": true,
+    "D_prefix_cache_enabled": false
+  },
+  "measurement": {
+    "entrypoint": "normal PD router /generate with pre-tokenized input_ids",
+    "profiler": false,
+    "prefix_warmup_excluded": true,
+    "warmup_bursts_per_concurrency": 1,
+    "formal_bursts_per_concurrency": 2,
+    "output_tps": "sum(completed output tokens) / sum(formal burst wall seconds)",
+    "generation_tok_s": "per request: (completion_tokens - 1) / (last_content_time - first_content_time)",
+    "ttft": "first nonempty generated streaming chunk; excludes chat rendering and BPE",
+    "tpot": "generation interval / (completion_tokens - 1); stream-chunk estimate",
+    "quantiles": "pooled individual requests; linear interpolation at (n-1)*p"
+  },
+  "concurrency": {
+    "1": {
+      "rounds": 2,
+      "requests": 2,
+      "api_success": 2,
+      "natural_stop": 2,
+      "output_tokens": 6314,
+      "total_burst_wall_s": 22.700887381564826,
+      "pooled_output_tok_s": 278.1389068132878,
+      "round_output_tok_s": [
+        278.8566703158903,
+        277.40654974300656
+      ],
+      "prompt_tokens": [
+        131072
+      ],
+      "output_token_range": [
+        3117,
+        3197
+      ],
+      "sampled_peak_running": 1,
+      "sampled_peak_running_per_dp": {
+        "0": 1,
+        "1": 1,
+        "2": 0,
+        "3": 0
+      },
+      "sampled_peak_waiting": 1,
+      "sampled_peak_token_usage_per_dp": 0.0103,
+      "ttft_s": {
+        "p50": 0.11562722222879529,
+        "p95": 0.11625776179134846,
+        "p99": 0.11631380975246429
+      },
+      "e2e_s": {
+        "p50": 11.35010443488136,
+        "p95": 11.452872474910691,
+        "p99": 11.462007411802187
+      },
+      "estimated_decode_tok_s": {
+        "p50": 280.915512860014,
+        "p95": 281.5344612038777,
+        "p99": 281.58947883444336,
+        "min": 280.2277924779432
+      },
+      "estimated_tpot_ms": {
+        "p50": 3.5598105040271846,
+        "p95": 3.5676539256791395,
+        "p99": 3.568351118714869
+      },
+      "below_100_generation_tok_s": 0,
+      "zero_retractions": true,
+      "cached_tokens": [
+        130816
+      ],
+      "weighted_spec_accept_length": 5.158496732026144,
+      "generated_code_semantic_failures": 0
+    },
+    "4": {
+      "rounds": 2,
+      "requests": 8,
+      "api_success": 8,
+      "natural_stop": 8,
+      "output_tokens": 24634,
+      "total_burst_wall_s": 24.747238046023995,
+      "pooled_output_tok_s": 995.4242147825386,
+      "round_output_tok_s": [
+        1051.4413846785224,
+        945.2831027662403
+      ],
+      "prompt_tokens": [
+        131072
+      ],
+      "output_token_range": [
+        2722,
+        3430
+      ],
+      "sampled_peak_running": 4,
+      "sampled_peak_running_per_dp": {
+        "0": 1,
+        "1": 1,
+        "2": 1,
+        "3": 1
+      },
+      "sampled_peak_waiting": 4,
+      "sampled_peak_token_usage_per_dp": 0.0103,
+      "ttft_s": {
+        "p50": 0.2991050989367068,
+        "p95": 0.3122081685811281,
+        "p99": 0.31235344007611276
+      },
+      "e2e_s": {
+        "p50": 11.505036388291046,
+        "p95": 12.593983451300302,
+        "p99": 12.964633567337877
+      },
+      "estimated_decode_tok_s": {
+        "p50": 280.23317735790255,
+        "p95": 284.4537903758781,
+        "p99": 284.86782077361374,
+        "min": 268.7243525469239
+      },
+      "estimated_tpot_ms": {
+        "p50": 3.5684591547821665,
+        "p95": 3.686349803546163,
+        "p99": 3.714298251661413
+      },
+      "below_100_generation_tok_s": 0,
+      "zero_retractions": true,
+      "cached_tokens": [
+        130816
+      ],
+      "weighted_spec_accept_length": 5.125676238035789,
+      "generated_code_semantic_failures": 0
+    },
+    "16": {
+      "rounds": 2,
+      "requests": 32,
+      "api_success": 32,
+      "natural_stop": 32,
+      "output_tokens": 101462,
+      "total_burst_wall_s": 37.51996494317427,
+      "pooled_output_tok_s": 2704.2136141030223,
+      "round_output_tok_s": [
+        2762.411718339355,
+        2647.8368369724203
+      ],
+      "prompt_tokens": [
+        131072
+      ],
+      "output_token_range": [
+        2897,
+        3716
+      ],
+      "sampled_peak_running": 16,
+      "sampled_peak_running_per_dp": {
+        "0": 4,
+        "1": 4,
+        "2": 4,
+        "3": 4
+      },
+      "sampled_peak_waiting": 16,
+      "sampled_peak_token_usage_per_dp": 0.041,
+      "ttft_s": {
+        "p50": 0.8196342419832945,
+        "p95": 0.9044117615325377,
+        "p99": 0.9054386996477842
+      },
+      "e2e_s": {
+        "p50": 16.793663966935128,
+        "p95": 18.3696826454252,
+        "p99": 18.87258105343208
+      },
+      "estimated_decode_tok_s": {
+        "p50": 197.65256672137087,
+        "p95": 201.90585249393408,
+        "p99": 203.17131825747194,
+        "min": 189.15937627522257
+      },
+      "estimated_tpot_ms": {
+        "p50": 5.0593835772978935,
+        "p95": 5.2258863343932855,
+        "p99": 5.268101865590484
+      },
+      "below_100_generation_tok_s": 0,
+      "zero_retractions": true,
+      "cached_tokens": [
+        130816
+      ],
+      "weighted_spec_accept_length": 5.127191874273587,
+      "generated_code_semantic_failures": 0
+    },
+    "32": {
+      "rounds": 2,
+      "requests": 64,
+      "api_success": 64,
+      "natural_stop": 64,
+      "output_tokens": 197809,
+      "total_burst_wall_s": 44.76432529790327,
+      "pooled_output_tok_s": 4418.898278564365,
+      "round_output_tok_s": [
+        4414.053036176072,
+        4423.704147826353
+      ],
+      "prompt_tokens": [
+        131072
+      ],
+      "output_token_range": [
+        2384,
+        3269
+      ],
+      "sampled_peak_running": 32,
+      "sampled_peak_running_per_dp": {
+        "0": 8,
+        "1": 8,
+        "2": 8,
+        "3": 8
+      },
+      "sampled_peak_waiting": 32,
+      "sampled_peak_token_usage_per_dp": 0.0819,
+      "ttft_s": {
+        "p50": 1.5313424421474338,
+        "p95": 1.6199267433257774,
+        "p99": 1.6222597765829414
+      },
+      "e2e_s": {
+        "p50": 21.528375832829624,
+        "p95": 22.20765519498382,
+        "p99": 22.360319115184247
+      },
+      "estimated_decode_tok_s": {
+        "p50": 157.72816245627612,
+        "p95": 161.95673280239365,
+        "p99": 166.76847469690767,
+        "min": 154.70858199740883
+      },
+      "estimated_tpot_ms": {
+        "p50": 6.3400220282094235,
+        "p95": 6.441480247390964,
+        "p99": 6.45463893615718
+      },
+      "below_100_generation_tok_s": 0,
+      "zero_retractions": true,
+      "cached_tokens": [
+        130816
+      ],
+      "weighted_spec_accept_length": 5.138296490635634,
+      "generated_code_semantic_failures": 1
+    },
+    "64": {
+      "rounds": 2,
+      "requests": 128,
+      "api_success": 128,
+      "natural_stop": 128,
+      "output_tokens": 399197,
+      "total_burst_wall_s": 66.23144508851692,
+      "pooled_output_tok_s": 6027.303186069422,
+      "round_output_tok_s": [
+        6045.09690274241,
+        6009.607815246461
+      ],
+      "prompt_tokens": [
+        131072
+      ],
+      "output_token_range": [
+        2685,
+        3469
+      ],
+      "sampled_peak_running": 64,
+      "sampled_peak_running_per_dp": {
+        "0": 16,
+        "1": 16,
+        "2": 16,
+        "3": 16
+      },
+      "sampled_peak_waiting": 64,
+      "sampled_peak_token_usage_per_dp": 0.1636,
+      "ttft_s": {
+        "p50": 2.628508725669235,
+        "p95": 3.4820694007910786,
+        "p99": 3.491748840739019
+      },
+      "e2e_s": {
+        "p50": 30.64640632085502,
+        "p95": 32.254812350007704,
+        "p99": 33.01515685482882
+      },
+      "estimated_decode_tok_s": {
+        "p50": 112.50712433744263,
+        "p95": 116.31818161135716,
+        "p99": 119.34680825123736,
+        "min": 108.39941230609841
+      },
+      "estimated_tpot_ms": {
+        "p50": 8.888326027729574,
+        "p95": 9.150363422757811,
+        "p99": 9.207646828987444
+      },
+      "below_100_generation_tok_s": 0,
+      "zero_retractions": true,
+      "cached_tokens": [
+        130816
+      ],
+      "weighted_spec_accept_length": 5.131528543699305,
+      "generated_code_semantic_failures": 1
+    },
+    "80": {
+      "rounds": 2,
+      "requests": 160,
+      "api_success": 160,
+      "natural_stop": 160,
+      "output_tokens": 495919,
+      "total_burst_wall_s": 70.02203891705722,
+      "pooled_output_tok_s": 7082.327331076834,
+      "round_output_tok_s": [
+        7049.7483414792305,
+        7115.769809992244
+      ],
+      "prompt_tokens": [
+        131072
+      ],
+      "output_token_range": [
+        2352,
+        3610
+      ],
+      "sampled_peak_running": 80,
+      "sampled_peak_running_per_dp": {
+        "0": 20,
+        "1": 20,
+        "2": 20,
+        "3": 20
+      },
+      "sampled_peak_waiting": 80,
+      "sampled_peak_token_usage_per_dp": 0.2045,
+      "ttft_s": {
+        "p50": 3.3030479575973004,
+        "p95": 4.166064764838666,
+        "p99": 4.1694201332516965
+      },
+      "e2e_s": {
+        "p50": 32.58270800532773,
+        "p95": 34.30317126265727,
+        "p99": 34.50961897738278
+      },
+      "estimated_decode_tok_s": {
+        "p50": 106.82666133182347,
+        "p95": 110.82135028672195,
+        "p99": 112.74820750828518,
+        "min": 103.4179916527905
+      },
+      "estimated_tpot_ms": {
+        "p50": 9.360959237403534,
+        "p95": 9.538880329086739,
+        "p99": 9.617037895338095
+      },
+      "below_100_generation_tok_s": 0,
+      "zero_retractions": true,
+      "cached_tokens": [
+        130816
+      ],
+      "weighted_spec_accept_length": 5.129913522012578,
+      "generated_code_semantic_failures": 2
+    }
+  },
+  "all_burst_request_gates": {
+    "requests_including_warmup": 591,
+    "formal_requests": 394,
+    "api_cache_natural_eos_zero_retraction_pass": true
+  },
+  "generated_code_validation": {
+    "failed_behavior_occurrences": 5,
+    "failed_unique_by_api_or_stage": {
+      "optimal_schedule": 5
+    },
+    "files": 18,
+    "input_sha256_counts": {},
+    "passed_unique_outputs": 579,
+    "protocol_errors": 0,
+    "requests": 591,
+    "unique_outputs": 584,
+    "validator_sha256": "5c99e44550814eeecbf7bf43a24c31d7a5f4173b85ec354b4260d61af82030f0",
+    "artifact_sha256": "45ea4579affc23a25c0dd56884d46bad01684288f6b38d23d441dea5525dee16",
+    "formal_failure_occurrences": 4,
+    "scope": "Independent bounded six-API behavioral checks, separate from runtime numerical checks."
+  },
+  "hardware": {
+    "P": {
+      "sample_count": 121,
+      "gpu_observations": 968,
+      "query_errors": [],
+      "max_temperature_c": 44.0,
+      "min_free_memory_mib": 12528.0,
+      "sm_clocks_mhz": [
+        1830.0
+      ],
+      "busy_sm_clocks_mhz": [
+        1830.0
+      ],
+      "thermal_flags": {
+        "clocks_event_reasons.hw_thermal_slowdown": [
+          "Not Active"
+        ],
+        "clocks_event_reasons.sw_thermal_slowdown": [
+          "Not Active"
+        ]
+      },
+      "volatile_uncorrected_ecc": [
+        "0"
+      ],
+      "scope": "Only complete telemetry queries contained within a formal burst; sampled, not continuous."
+    },
+    "D": {
+      "sample_count": 120,
+      "gpu_observations": 960,
+      "query_errors": [],
+      "max_temperature_c": 53.0,
+      "min_free_memory_mib": 3108.0,
+      "sm_clocks_mhz": [
+        1830.0
+      ],
+      "busy_sm_clocks_mhz": [
+        1830.0
+      ],
+      "thermal_flags": {
+        "clocks_event_reasons.hw_thermal_slowdown": [
+          "Not Active"
+        ],
+        "clocks_event_reasons.sw_thermal_slowdown": [
+          "Not Active"
+        ]
+      },
+      "volatile_uncorrected_ecc": [
+        "0"
+      ],
+      "scope": "Only complete telemetry queries contained within a formal burst; sampled, not continuous."
+    }
+  },
+  "result_sha256": {
+    "c1-r0.json": "ed06f92f489a93932119c76e1cea6792ef2d164f1cc19ec4c6dd13277fa31e6a",
+    "c1-r1.json": "707181c0f5bfd3a5c9abf3a5e4faadc74e5e24b46968037f0ba7d314984307e7",
+    "c1-r2.json": "18fe8b2c15e51bbc45be28a680234879be93ef3fae188faa1b9f66f8ed56fd28",
+    "c16-r0.json": "b7442a08fcd829fee9cfdb7f2888b1f849b0ef295c3800ab04c31a289c6e8e7b",
+    "c16-r1.json": "b17d1189d44ef846e7d84b1918162ebf4664b526ab52cb52cec9bdd3e5b15460",
+    "c16-r2.json": "642f4eb745811aa3a862ba5b79b4226a7cf164adbc2ce7f2677eb3bfe113f4a8",
+    "c32-r0.json": "96f8b773f53d3df8ee0681b53a73638e9e16ac077fa47e8bc9d859e9dabaf5bb",
+    "c32-r1.json": "508f5a12ce72f91ee570bffaa02ae4a7b6957e392aaef8f5c02d9bebd142cacc",
+    "c32-r2.json": "7d013f612238ccc1a9e36952b34baac54463ef5cdb1931ba3fefa12a2e142983",
+    "c4-r0.json": "608f09f3112264d673596b17fb5f7a2d9250366cac629d3eeec9c6f87a06cfd9",
+    "c4-r1.json": "84e430776fcc02a29acad50171845110ea4b087ed7496e46e1169a0a25bbb17a",
+    "c4-r2.json": "c19e6b8df238d02b64e2768737579a64492167159e5dc178a5321419aa5abfe7",
+    "c64-r0.json": "8a2878122fa2fdb41184c064da9024e4aa893513f5f94c15222be08a1638ff7f",
+    "c64-r1.json": "51559bb38611f694dcffaaecc76032b2d68f98394759346d82b01046747cc6a3",
+    "c64-r2.json": "461c294d09f4c80e1fd6a3b1a49068422e969434030e6f6e5a5dea45e1e0ceb8",
+    "c80-r0.json": "4fc7a6bf894e38f7f072de19d6d63fe7231cc27a393c22f0587782a7d452b3d4",
+    "c80-r1.json": "e9ffed4b49772c4c98ebc04f9c4b66a9f4ed2c5bd7aef50109aa5418e15cab0e",
+    "c80-r2.json": "28e91dd796f9fe1ca3161ba3c489176115d167573079e3186fd92d4d11c50e42"
+  },
+  "limits": [
+    "Burst throughput includes prefill/transfer/queue/drain, not a steady-state service SLA.",
+    "Running counts are periodic scheduler samples, not client outstanding requests.",
+    "TTFT is first generated streaming chunk; TPOT/decode rate are estimates from usage and arrival times.",
+    "API success and natural stop do not imply generated code is correct; consult independent validator.",
+    "The P prefix is shared; this does not establish distinct-prefix P residency.",
+    "Two measured concurrency-one requests do not characterize a stable tail-latency distribution."
+  ],
+  "evidence_archive_sha256": {
+    "P": "d16a080d5dce58e28de92a0f16b77b469195dd8ba029db22754821a32a1f493a",
+    "D": "ac7ab6c5b932c6a4038c89105ea94b7f6b60e262064c29dd8d77aa2590c2a735"
+  },
+  "offline_occupancy_audit_sha256": "35635263edf57a6811d8df5daf9341a14376071ce480b75511dd29e3a3d8a299",
+  "log_audit": {
+    "P_suspect_lines_after_preflight": 0,
+    "D_suspect_lines_after_preflight": 0,
+    "router_suspect_lines_during_bursts": 0,
+    "router_timestamped_lines_checked": 1183
+  }
+}

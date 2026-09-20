@@ -4,9 +4,11 @@ The v9 checkpoint preserves a tested integration on top of SGLang
 `da64c5cbb8cf6bfd39be19da43573fdfd484c43a`. It is the checkpoint before
 further block-FP8 GEMM and compact-prefill optimization.
 
-The latest whole-version optimization and natural-EOS coding measurements are
-in [V11.md](V11.md). [V10.md](V10.md) documents the preceding compute/indexer
-step; the sections below preserve the historical v9 checkpoint and configuration.
+The latest checkpoint, its complete launch configuration, and cached128k
+natural-EOS measurements at 1/4/16/32/64/80 concurrent requests are in
+[V12.md](V12.md). [V11.md](V11.md) and [V10.md](V10.md) preserve the preceding
+combined optimizations. The sections below describe the historical v9
+checkpoint and configuration.
 
 ## Changes and provenance
 

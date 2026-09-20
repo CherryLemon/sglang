@@ -56,6 +56,22 @@ changes. The 29-file deployment bundle SHA256 is
 `1e8639c179c3f6183fbc92f598a5dcdb18cf0db179e1cfa0cba898e24d923f7e`;
 its rollback is the prior combined runtime `77f7fdc0`.
 
-Combined unprofiled 80/128-request validation is in progress. Component
-coverage does not establish a 128-request 100 tokens/s result. The earlier
-imbalanced round remains part of the record.
+Combined unprofiled 80/128-request validation completed. The two formal
+80-request bursts had minimum per-request generation rates of 103.004 and
+102.816 tokens/s; both reached real running80. The two 128-request bursts
+reached running128 with balanced 32/32/32/32 occupancy, but their minimum
+rates were 76.104 and 75.240 tokens/s. This does not establish a 128-request
+100 tokens/s result. The earlier imbalanced round remains part of the record.
+
+All 624 requests including warmup passed API, cache-count, natural-EOS, and
+explicit zero-retraction checks. The generated-code checker passed 618 of
+624 distinct programs; six RollbackDSU semantic errors are retained separately
+from runtime correctness. Seven known-answer boundary requests, including
+cold600k, and all-eight-rank P graph capture passed.
+
+A separate 128-request direct-PD correctness diagnostic held the controlled
+32/33/31/32 distribution and completed every request successfully. All 128
+generated programs passed. Capture, target graph logs, and verified replay
+selection jointly support target graph34; this is not an Nsight kernel trace
+or a normal-router performance measurement. The final checkpoint and the
+requested 1/4/16/32/64/80 sweep are recorded in [V12.md](V12.md).
