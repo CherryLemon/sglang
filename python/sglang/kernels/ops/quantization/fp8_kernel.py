@@ -1718,6 +1718,41 @@ def w8a8_block_fp8_matmul_triton(
     )
     if hopper_tuned:
         kernel = _w8a8_block_fp8_matmul_hopper
+        # Fixed decode shapes eliminate dynamic group/shape arithmetic while
+        # retaining each K32 dot, scale application and SplitK reduction.
+        if (
+            (block_n, block_k) == (32, 32)
+            and output_dtype in (torch.bfloat16, torch.float32)
+            and A.dtype == B.dtype == torch.float8_e4m3fn
+            and config
+            == {
+                "BLOCK_SIZE_M": 64,
+                "BLOCK_SIZE_N": 64,
+                "BLOCK_SIZE_K": 32,
+                "GROUP_SIZE_M": 1,
+                "num_warps": 4,
+                "num_stages": 3,
+                "SWAP_AB": True,
+                "SPLIT_K": {
+                    (1792, 5120): 4,
+                    (16384, 1280): 1,
+                    (5120, 4096): 2,
+                    (576, 5120): 4,
+                }.get((N, K)),
+            }
+            and (
+                (
+                    (N, K) in ((1792, 5120), (16384, 1280), (5120, 4096))
+                    and M in (100, 120, 160, 192)
+                )
+                or ((N, K) == (576, 5120) and M in (400, 480, 640, 768))
+            )
+        ):
+            from sglang.kernels.ops.quantization.fp8_hopper_static import (
+                _w8a8_block_fp8_matmul_hopper_static,
+            )
+
+            kernel = _w8a8_block_fp8_matmul_hopper_static
     split_k = config.get("SPLIT_K", 1) if hopper_tuned else 1
     if split_k > 1:
         assert split_k & (split_k - 1) == 0
