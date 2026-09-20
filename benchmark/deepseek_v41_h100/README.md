@@ -4,9 +4,9 @@ The v9 checkpoint preserves a tested integration on top of SGLang
 `da64c5cbb8cf6bfd39be19da43573fdfd484c43a`. It is the checkpoint before
 further block-FP8 GEMM and compact-prefill optimization.
 
-This branch adds that next optimization step. See [V10.md](V10.md) for its
-implementation and validation; the sections below document the historical v9
-checkpoint and its configuration.
+The latest whole-version optimization and natural-EOS coding measurements are
+in [V11.md](V11.md). [V10.md](V10.md) documents the preceding compute/indexer
+step; the sections below preserve the historical v9 checkpoint and configuration.
 
 ## Changes and provenance
 
