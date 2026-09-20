@@ -615,7 +615,13 @@ def fp8_index_logits_prefill(
     out = torch.empty((rows, out_width), dtype=torch.float32, device=q.device)
     if rows == 0 or out_width == 0:
         return out
+    # On H100, the 32-head source path is limited by repeated cached loads
+    # and small CTAs, rather than HBM traffic. Widen only the key dimension:
+    # grouping query heads would change the tensor-core accumulation path.
+    # Candidate gathers need a smaller tile to retain enough resident warps.
     block_l = 64
+    if heads == 32 and out_width >= 4096 and rows * out_width >= 262144:
+        block_l = 128 if use_candidates else 256
     _fp8_index_logits_prefill_kernel[(rows, triton.cdiv(out_width, block_l))](
         q,
         weights,
