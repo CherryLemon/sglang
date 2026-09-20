@@ -12,6 +12,16 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--configs", required=True)
     p.add_argument("--output", required=True)
+    p.add_argument(
+        "--shapes",
+        default="576:5120,1792:5120,16384:1280,5120:4096,25600:6144",
+        help="Comma-separated N:K weight shapes to validate",
+    )
+    p.add_argument(
+        "--rows",
+        default="0,1,2,3,4,5,6,7,8,12,16,24,31,32,48,64,80,96,128",
+        help="Rows, including CUDA graph tiers and configuration boundaries",
+    )
     a = p.parse_args()
     torch.backends.cuda.matmul.allow_tf32 = False
     default = dict(
@@ -28,19 +38,19 @@ def main():
             "N=*,K=*,device_name=NVIDIA_H100_80GB_HBM3,dtype=fp8_w8a8,block_shape=*32, 32*.json"
         )
     )
-    expected = {(576, 5120), (1792, 5120), (16384, 1280), (5120, 4096), (25600, 6144)}
+    expected = {tuple(map(int, shape.split(":"))) for shape in a.shapes.split(",")}
     paths = [
         path
         for path in paths
         if (int(path.name.split(",")[0][2:]), int(path.name.split(",")[1][2:]))
         in expected
     ]
-    assert len(paths) == len(expected), "Expected all five H100 block32 configs"
+    assert len(paths) == len(expected), "Missing requested H100 block32 configs"
     for path in paths:
         n = int(path.name.split(",")[0][2:])
         k = int(path.name.split(",")[1][2:])
         cfg = {int(x): v for x, v in json.loads(path.read_text()).items()}
-        for m in [0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 31, 32, 48, 64, 80, 96, 128]:
+        for m in map(int, a.rows.split(",")):
             torch.manual_seed(m + 37)
             w = torch.randn(n, k, device="cuda").to(torch.float8_e4m3fn)
             ws = torch.exp2(
