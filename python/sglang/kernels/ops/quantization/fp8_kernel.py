@@ -1718,8 +1718,10 @@ def w8a8_block_fp8_matmul_triton(
     )
     if hopper_tuned:
         kernel = _w8a8_block_fp8_matmul_hopper
-        # Fixed decode shapes eliminate dynamic group/shape arithmetic while
-        # retaining each K32 dot, scale application and SplitK reduction.
+        # Even local batches 20..40 use target M=6*bs, draft M=5*bs,
+        # and shared-expert M=4 times those rows. Exact shapes eliminate
+        # dynamic group/shape arithmetic while retaining each K32 dot, scale
+        # application and SplitK reduction.
         if (
             (block_n, block_k) == (32, 32)
             and output_dtype in (torch.bfloat16, torch.float32)
@@ -1743,9 +1745,56 @@ def w8a8_block_fp8_matmul_triton(
             and (
                 (
                     (N, K) in ((1792, 5120), (16384, 1280), (5120, 4096))
-                    and M in (100, 120, 160, 192)
+                    and M
+                    in (
+                        100,
+                        110,
+                        120,
+                        130,
+                        132,
+                        140,
+                        144,
+                        150,
+                        156,
+                        160,
+                        168,
+                        170,
+                        180,
+                        190,
+                        192,
+                        200,
+                        204,
+                        216,
+                        228,
+                        240,
+                    )
                 )
-                or ((N, K) == (576, 5120) and M in (400, 480, 640, 768))
+                or (
+                    (N, K) == (576, 5120)
+                    and M
+                    in (
+                        400,
+                        440,
+                        480,
+                        520,
+                        528,
+                        560,
+                        576,
+                        600,
+                        624,
+                        640,
+                        672,
+                        680,
+                        720,
+                        760,
+                        768,
+                        800,
+                        816,
+                        864,
+                        912,
+                        960,
+                    )
+                )
             )
         ):
             from sglang.kernels.ops.quantization.fp8_hopper_static import (
